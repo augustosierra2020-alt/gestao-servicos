@@ -65,15 +65,15 @@ def limpar_descricao_os(desc_original):
         return "OFF"
     return desc_original
 
-# --- FUNÇÃO CORRIGIDA QUE EDITA DIRETAMENTE O SEU ARQUIVO ORIGINAL ---
+# --- FUNÇÃO QUE EDITA DIRETAMENTE O SEU ARQUIVO ORIGINAL ---
 def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, contato, linhas_tabela, total_valor):
     # Abre exatamente o arquivo de modelo anexado preservando imagens e estilos originais
     doc = Document(io.BytesIO(modelo_bytes))
     
     # 1. Preencher os dados do Cabeçalho sem apagar o texto original
-    for table in doc.tables:
+    for t in doc.tables:
         # Verifica se é a tabela pequena do cabeçalho que contém "Cliente:"
-        for row in table.rows:
+        for row in t.rows:
             for cell in row.cells:
                 if "Cliente:" in cell.text:
                     cell.text = f"Cliente: {cliente_nome} - {flash_point}"
@@ -100,13 +100,11 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
             break
             
     if tabela_servicos:
-        num_linhas_originais = len(tabela_servicos.rows)
-        
         # Preenche as linhas de dados existentes na tabela original do modelo
         for i, linha in enumerate(linhas_validas):
             idx_linha_destino = i + 1 # Ignora a linha 0 (cabeçalho)
             
-            # Se precisarmos de mais linhas do que o modelo já tem, adicionamos uma nova linha copiada
+            # Se precisarmos de mais linhas do que o modelo já tem, adicionamos uma nova linha
             if idx_linha_destino >= len(tabela_servicos.rows):
                 row_cells = tabela_servicos.add_row().cells
             else:
@@ -141,11 +139,12 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
 
     # 3. Preencher o campo TOTAL localizado no final do seu modelo original
     texto_total_formatado = f"R$ {total_valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    
+    # Varre tabelas procurando a palavra TOTAL
     for t in doc.tables:
-        for row in table.rows:
+        for row in t.rows:
             for cell in row.cells:
                 if "TOTAL" in cell.text.upper():
-                    # Localiza a tabela ou linha do Total e atualiza a célula do valor
                     cell.text = f"TOTAL: {texto_total_formatado}"
                     for p in cell.paragraphs:
                         p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
@@ -155,7 +154,7 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
                             run.font.size = Pt(12)
                             run.font.color.rgb = RGBColor(234, 88, 12)
 
-    # Se o total estiver em parágrafo comum fora de tabelas, atualiza também por segurança
+    # Varre parágrafos comuns procurando a palavra TOTAL (Garante o preenchimento)
     for p in doc.paragraphs:
         if "TOTAL" in p.text.upper():
             p.text = f"TOTAL: {texto_total_formatado}"
@@ -319,7 +318,6 @@ with aba1:
 with aba2:
     st.subheader("📄 Emissor de Ordem de Serviço com Base no Modelo Original")
     
-    # Campo para carregar seu arquivo sem qualquer modificação prévia
     modelo_word_carregado = st.file_uploader(
         "Selecione o seu arquivo original 'MODELO - HYPER TORK PERFORMANCE.docx':",
         type=["docx"],
@@ -342,7 +340,7 @@ with aba2:
         
         col1, col2 = st.columns(2)
         with col1:
-            nome_cliente_input = st.text_input("Cliente (Preenchido Automaticamente):", value=cliente_sugerido)
+            nome_cliente_input = st.text_input("Cliente (Preenchido Automatically):", value=cliente_sugerido)
             cidade_input = st.text_input("Cidade (Adicionar a critério do usuário):", placeholder="Ex: Cascavel - PR")
         with col2:
             flash_point_confirmacao = st.text_input("Flash Point Relacionado:", value=fp_selecionado, disabled=True)
