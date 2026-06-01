@@ -88,7 +88,7 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
                         for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
 
     # 2. Preencher a tabela de serviços original do seu documento
-    linhas_validas = [l for l in linhas_tabela if l.get("Valor") is not None and str(l.get("Valor")).strip() != ""]
+    linhas_validas = [l for l in linhas_tabela if l.get("Valor") is not None and str(l.get("Valor")).strip() != "" and str(l.get("Valor")).lower() != "nan"]
     
     # Procuramos a tabela de serviços principal (a que tem "Nº MAPA")
     tabela_servicos = None
@@ -134,19 +134,21 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
             linha_para_apagar = tabela_servicos.rows[linha_inicio_remocao]
             tabela_servicos._tbl.remove(linha_para_apagar._tr)
 
-    # 3. INTERAÇÃO PREVENTIVA E CIRÚRGICA PARA O CAMPO DO TOTAL (Caixa R$)
-    # Formata o número para o padrão nacional de moeda (Ex: 1.750,00)
-    valor_formatado_texto = f"{total_valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    # 3. INTERAÇÃO PARA O CAMPO DO TOTAL (Preenchimento seguro contra valores 'nan')
+    # Tratamento de segurança: se o total for inválido ou nulo por erro da planilha, assume 0
+    if pd.isna(total_valor) or str(total_valor).lower() == "nan":
+        total_valor = 0.0
+
+    valor_formatado_texto = f"{float(total_valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     
     # Busca por tabelas que contenham a linha do TOTAL e a caixa de texto do R$ ao lado
     for t in doc.tables:
         for row in t.rows:
-            # Varre as células da linha
             contem_total = any("TOTAL" in cell.text.upper() for cell in row.cells)
             if contem_total:
                 for cell in row.cells:
-                    # Alvo: Encontra a caixa/célula que tem o símbolo "R$" na frente de TOTAL
-                    if "R$" in cell.text or cell.text.strip() == "":
+                    # Alvo: Encontra a caixa/célula que tem o símbolo "R$" ou que faz parte da linha de TOTAL
+                    if "R$" in cell.text or "NAN" in cell.text.upper() or cell.text.strip() == "":
                         cell.text = f"R$ {valor_formatado_texto}"
                         for p in cell.paragraphs:
                             p.alignment = WD_ALIGN_PARAGRAPH.LEFT
@@ -156,9 +158,9 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
                                 run.font.size = Pt(12)
                                 run.font.color.rgb = RGBColor(234, 88, 12) # Laranja corporativo
 
-    # Varre parágrafos comuns por redundância (garantindo que se houver texto solto "TOTAL, R$", ele trate)
+    # Varre parágrafos comuns por redundância (garantindo que se houver texto solto "TOTAL", ele trate sem 'nan')
     for p in doc.paragraphs:
-        if "TOTAL" in p.text.upper() and "R$" in p.text:
+        if "TOTAL" in p.text.upper():
             p.text = f"TOTAL: R$ {valor_formatado_texto}"
             for run in p.runs:
                 run.bold = True
@@ -298,11 +300,11 @@ with aba1:
 
                         for num_linha in linhas_amarelas:
                             for col_idx in range(1, len(colunas_finais) + 1):
-                                worksheet.cell(row=num_linha, column=col_idx).fill = yellow_claro = amarelo_claro
+                                worksheet.cell(row=num_linha, column=col_idx).fill = amarelo_claro
 
                         for num_linha in linhas_laranjas:
                             for col_idx in range(1, len(colunas_finais) + 1):
-                                worksheet.cell(row=num_linha, column=col_idx).fill = orange_claro = laranja_claro
+                                worksheet.cell(row=num_linha, column=col_idx).fill = laranja_claro
 
                     st.success("Planilha processada com sucesso na memória! Vá para a aba ao lado para gerar Ordens de Serviço.")
                     st.download_button(
@@ -363,7 +365,7 @@ with aba2:
             else:
                 if placa != "":
                     placas_vistas_os.add(placa)
-                if row_dict["Valor"] is not None:
+                if row_dict["Valor"] is not None and str(row_dict["Valor"]).lower() != "nan" and not pd.isna(row_dict["Valor"]):
                     soma_total_os += float(row_dict["Valor"])
             
             linhas_os_finais.append(row_dict)
