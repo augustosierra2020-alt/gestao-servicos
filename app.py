@@ -67,18 +67,15 @@ def limpar_descricao_os(desc_original):
 
 # --- FUNÇÃO QUE EDITA DIRETAMENTE O SEU ARQUIVO ORIGINAL ---
 def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, contato, linhas_tabela, total_valor):
-    # Abre exatamente o arquivo de modelo anexado preservando imagens e estilos originais
     doc = Document(io.BytesIO(modelo_bytes))
     
     # 1. Preencher os dados do Cabeçalho estritamente na caixa/célula da frente
     for t in doc.tables:
         for row in t.rows:
-            # Verifica se a linha tem pelo menos duas células (Título e Caixa de Resposta)
             if len(row.cells) >= 2:
                 texto_celula_1 = row.cells[0].text.upper().strip()
                 
                 if "CLIENTE:" in texto_celula_1:
-                    # Preenche na célula da frente (caixa de texto)
                     row.cells[1].text = f"{cliente_nome} - {flash_point}"
                     for p in row.cells[1].paragraphs:
                         for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
@@ -96,7 +93,6 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
     # 2. Preencher a tabela de serviços original do seu documento
     linhas_validas = [l for l in linhas_tabela if l.get("Valor") is not None and str(l.get("Valor")).strip() != "" and str(l.get("Valor")).lower() != "nan"]
     
-    # Procuramos a tabela de serviços principal (a que tem "Nº MAPA")
     tabela_servicos = None
     for t in doc.tables:
         if len(t.rows) > 0 and "Nº MAPA" in t.rows[0].cells[0].text.upper():
@@ -104,11 +100,9 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
             break
             
     if tabela_servicos:
-        # Preenche as linhas de dados existentes na tabela original do modelo
         for i, linha in enumerate(linhas_validas):
-            idx_linha_destino = i + 1 # Ignora a linha 0 (cabeçalho da tabela)
+            idx_linha_destino = i + 1
             
-            # Se precisarmos de mais linhas do que o modelo já tem, adicionamos uma nova linha
             if idx_linha_destino >= len(tabela_servicos.rows):
                 row_cells = tabela_servicos.add_row().cells
             else:
@@ -123,7 +117,6 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
                 f"R$ {linha.get('Valor', '')}"
             ]
             
-            # Escreve em cada célula correspondente da linha
             for idx_col, valor_celula in enumerate(dados_linha):
                 if idx_col < len(row_cells):
                     row_cells[idx_col].text = valor_celula
@@ -134,25 +127,23 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
                             r.font.name = 'Arial'
                             r.font.size = Pt(10)
                             
-        # EXCLUSÃO DAS LINHAS SOBRESSALENTES VAZIAS:
+        # EXCLUSÃO DAS LINHAS SOBRESSALENTES VAZIAS
         linha_inicio_remocao = len(linhas_validas) + 1
         while len(tabela_servicos.rows) > linha_inicio_remocao:
             linha_para_apagar = tabela_servicos.rows[linha_inicio_remocao]
             tabela_servicos._tbl.remove(linha_para_apagar._tr)
 
-    # 3. INTERAÇÃO PARA O CAMPO DO TOTAL (Preenchimento seguro na caixa da frente do TOTAL)
+    # 3. INTERAÇÃO PARA O CAMPO DO TOTAL
     if pd.isna(total_valor) or str(total_valor).lower() == "nan":
         total_valor = 0.0
 
     valor_formatado_texto = f"{float(total_valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     
-    # Busca por tabelas que contenham a linha do TOTAL e preenche a caixa do R$ (célula ao lado)
     for t in doc.tables:
         for row in t.rows:
             contem_total = any("TOTAL" in cell.text.upper() for cell in row.cells)
             if contem_total:
                 for cell in row.cells:
-                    # Alvo: Encontra a caixa/célula que tem o símbolo "R$" ou que está ao lado de TOTAL
                     if "R$" in cell.text or "NAN" in cell.text.upper() or cell.text.strip() == "":
                         cell.text = f"R$ {valor_formatado_texto}"
                         for p in cell.paragraphs:
@@ -163,7 +154,6 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
                                 run.font.size = Pt(12)
                                 run.font.color.rgb = RGBColor(234, 88, 12)
 
-    # Salva o arquivo em memória mantendo a logo e o layout 100% intactos
     target = io.BytesIO()
     doc.save(target)
     target.seek(0)
@@ -231,7 +221,16 @@ with aba1:
                 colunas_finais = [col for col in ordem_solicitada if col in df_filtrado.columns]
                 df_filtrado = df_filtrado[colunas_finais].copy()
 
+                # --- NOVO: AJUSTE E FORMATAÇÃO DA DATA PARA O PADRÃO BRASIL (DD/MM/AAAA) ---
+                if "Data" in df_filtrado.columns:
+                    # Converte para o tipo datetime do pandas de forma segura e depois formata
+                    df_filtrado["Data"] = pd.to_datetime(df_filtrado["Data"], errors='coerce')
+                    # Transforma no padrão brasileiro (dia/mês/ano de 4 dígitos) descartando horários em branco
+                    df_filtrado["Data"] = df_filtrado["Data"].dt.strftime('%d/%m/%Y').fillna("")
+
+                # Força a coluna Flash Point a virar Texto/String pura
                 if "Flash Point" in df_filtrado.columns:
+                    df_filtrado["Flash Point"] = df_filtrado["Flash Point"].astype(str).str.strip()
                     df_filtrado = df_filtrado.sort_values(by=["Flash Point", "Nº Mapa"] if "Nº Mapa" in df_filtrado.columns else ["Flash Point"], ascending=True)
 
                 st.session_state.df_filtrado = df_filtrado.copy()
@@ -331,7 +330,8 @@ with aba2:
         df_base_os = st.session_state.df_filtrado
         bytes_modelo = modelo_word_carregado.read()
         
-        lista_fp_unicos = sorted(list(df_base_os["Flash Point"].unique()))
+        lista_fp_unicos = sorted(list(set(str(val).strip() for val in df_base_os["Flash Point"].unique() if pd.notna(val))))
+        
         fp_selecionado = st.selectbox("Selecione o Flash Point para gerar a OS correspondente:", lista_fp_unicos)
         
         dados_bloco = df_base_os[df_base_os["Flash Point"] == fp_selecionado]
@@ -339,7 +339,7 @@ with aba2:
         
         col1, col2 = st.columns(2)
         with col1:
-            nome_cliente_input = st.text_input("Cliente (Preenchido Automatically):", value=cliente_sugerido)
+            nome_cliente_input = st.text_input("Cliente (Preenchido Automaticamente):", value=cliente_sugerido)
             cidade_input = st.text_input("Cidade (Adicionar a critério do usuário):", placeholder="Ex: Cascavel - PR")
         with col2:
             flash_point_confirmacao = st.text_input("Flash Point Relacionado:", value=fp_selecionado, disabled=True)
