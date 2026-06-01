@@ -70,21 +70,27 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
     # Abre exatamente o arquivo de modelo anexado preservando imagens e estilos originais
     doc = Document(io.BytesIO(modelo_bytes))
     
-    # 1. Preencher os dados do Cabeçalho sem apagar o texto original
+    # 1. Preencher os dados do Cabeçalho estritamente na caixa/célula da frente
     for t in doc.tables:
         for row in t.rows:
-            for cell in row.cells:
-                if "Cliente:" in cell.text:
-                    cell.text = f"Cliente: {cliente_nome} - {flash_point}"
-                    for p in cell.paragraphs:
+            # Verifica se a linha tem pelo menos duas células (Título e Caixa de Resposta)
+            if len(row.cells) >= 2:
+                texto_celula_1 = row.cells[0].text.upper().strip()
+                
+                if "CLIENTE:" in texto_celula_1:
+                    # Preenche na célula da frente (caixa de texto)
+                    row.cells[1].text = f"{cliente_nome} - {flash_point}"
+                    for p in row.cells[1].paragraphs:
                         for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
-                elif "Cidade:" in cell.text:
-                    cell.text = f"Cidade: {cidade}"
-                    for p in cell.paragraphs:
+                        
+                elif "CIDADE:" in texto_celula_1:
+                    row.cells[1].text = cidade
+                    for p in row.cells[1].paragraphs:
                         for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
-                elif "Contato:" in cell.text:
-                    cell.text = f"Contato: {contato}"
-                    for p in cell.paragraphs:
+                        
+                elif "CONTATO:" in texto_celula_1:
+                    row.cells[1].text = contato
+                    for p in row.cells[1].paragraphs:
                         for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
 
     # 2. Preencher a tabela de serviços original do seu documento
@@ -100,7 +106,7 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
     if tabela_servicos:
         # Preenche as linhas de dados existentes na tabela original do modelo
         for i, linha in enumerate(linhas_validas):
-            idx_linha_destino = i + 1 # Ignora a linha 0 (cabeçalho)
+            idx_linha_destino = i + 1 # Ignora a linha 0 (cabeçalho da tabela)
             
             # Se precisarmos de mais linhas do que o modelo já tem, adicionamos uma nova linha
             if idx_linha_destino >= len(tabela_servicos.rows):
@@ -134,20 +140,19 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
             linha_para_apagar = tabela_servicos.rows[linha_inicio_remocao]
             tabela_servicos._tbl.remove(linha_para_apagar._tr)
 
-    # 3. INTERAÇÃO PARA O CAMPO DO TOTAL (Preenchimento seguro contra valores 'nan')
-    # Tratamento de segurança: se o total for inválido ou nulo por erro da planilha, assume 0
+    # 3. INTERAÇÃO PARA O CAMPO DO TOTAL (Preenchimento seguro na caixa da frente do TOTAL)
     if pd.isna(total_valor) or str(total_valor).lower() == "nan":
         total_valor = 0.0
 
     valor_formatado_texto = f"{float(total_valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     
-    # Busca por tabelas que contenham a linha do TOTAL e a caixa de texto do R$ ao lado
+    # Busca por tabelas que contenham a linha do TOTAL e preenche a caixa do R$ (célula ao lado)
     for t in doc.tables:
         for row in t.rows:
             contem_total = any("TOTAL" in cell.text.upper() for cell in row.cells)
             if contem_total:
                 for cell in row.cells:
-                    # Alvo: Encontra a caixa/célula que tem o símbolo "R$" ou que faz parte da linha de TOTAL
+                    # Alvo: Encontra a caixa/célula que tem o símbolo "R$" ou que está ao lado de TOTAL
                     if "R$" in cell.text or "NAN" in cell.text.upper() or cell.text.strip() == "":
                         cell.text = f"R$ {valor_formatado_texto}"
                         for p in cell.paragraphs:
@@ -156,19 +161,9 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
                                 run.bold = True
                                 run.font.name = 'Arial'
                                 run.font.size = Pt(12)
-                                run.font.color.rgb = RGBColor(234, 88, 12) # Laranja corporativo
+                                run.font.color.rgb = RGBColor(234, 88, 12)
 
-    # Varre parágrafos comuns por redundância (garantindo que se houver texto solto "TOTAL", ele trate sem 'nan')
-    for p in doc.paragraphs:
-        if "TOTAL" in p.text.upper():
-            p.text = f"TOTAL: R$ {valor_formatado_texto}"
-            for run in p.runs:
-                run.bold = True
-                run.font.name = 'Arial'
-                run.font.size = Pt(12)
-                run.font.color.rgb = RGBColor(234, 88, 12)
-
-    # Salva o arquivo em memória mantendo a logo intacta
+    # Salva o arquivo em memória mantendo a logo e o layout 100% intactos
     target = io.BytesIO()
     doc.save(target)
     target.seek(0)
@@ -344,7 +339,7 @@ with aba2:
         
         col1, col2 = st.columns(2)
         with col1:
-            nome_cliente_input = st.text_input("Cliente (Preenchido Automaticamente):", value=cliente_sugerido)
+            nome_cliente_input = st.text_input("Cliente (Preenchido Automatically):", value=cliente_sugerido)
             cidade_input = st.text_input("Cidade (Adicionar a critério do usuário):", placeholder="Ex: Cascavel - PR")
         with col2:
             flash_point_confirmacao = st.text_input("Flash Point Relacionado:", value=fp_selecionado, disabled=True)
