@@ -20,13 +20,8 @@ st.write(
 # Criando abas para organizar o fluxo do sistema
 aba1, aba2 = st.tabs(["📋 Processamento da Planilha", "📄 Gerar Ordem de Serviço"])
 
-# Inicializando variáveis na sessão do Streamlit para compartilhar dados entre as abas
 if "df_filtrado" not in st.session_state:
     st.session_state.df_filtrado = None
-if "df_excel_final" not in st.session_state:
-    st.session_state.df_excel_final = None
-if "colunas_finais" not in st.session_state:
-    st.session_state.colunas_finais = []
 
 # --- FUNÇÃO DE CÁLCULO DE VALOR ---
 def calcular_valor_inicial(linha):
@@ -57,7 +52,7 @@ def calcular_valor_inicial(linha):
 
     return None
 
-# --- FUNÇÃO PARA FILTRAR APENAS OS TERMOS SOLICITADOS NA DESCRIÇÃO DA OS ---
+# --- FUNÇÃO PARA FILTRAR APENAS OS TERMOS SOLICITADOS NA DESCRIÇÃO ---
 def limpar_descricao_os(desc_original):
     desc_upper = str(desc_original).upper().strip()
     if "STAG 2" in desc_upper or "STAG2" in desc_upper:
@@ -70,40 +65,53 @@ def limpar_descricao_os(desc_original):
         return "OFF"
     return desc_original
 
-# --- FUNÇÃO QUE INJETA OS DADOS DENTRO DO SEU MODELO WORD ANEXADO ---
+# --- FUNÇÃO CORRIGIDA QUE EDITA DIRETAMENTE O SEU ARQUIVO ORIGINAL ---
 def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, contato, linhas_tabela, total_valor):
-    # Abre exatamente o arquivo de modelo anexado
+    # Abre exatamente o arquivo de modelo anexado preservando imagens e estilos originais
     doc = Document(io.BytesIO(modelo_bytes))
     
-    # 1. Localiza e preenche cirurgicamente as linhas de cabeçalho mantendo a estrutura
-    for p in doc.paragraphs:
-        if "Cliente:" in p.text:
-            p.text = f"Cliente: {cliente_nome} - {flash_point}"
-            for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
-        elif "Cidade:" in p.text:
-            p.text = f"Cidade: {cidade}"
-            for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
-        elif "Contato:" in p.text:
-            p.text = f"Contato: {contato}"
-            for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
+    # 1. Preencher os dados do Cabeçalho sem apagar o texto original
+    for table in doc.tables:
+        # Verifica se é a tabela pequena do cabeçalho que contém "Cliente:"
+        for row in table.rows:
+            for cell in row.cells:
+                if "Cliente:" in cell.text:
+                    cell.text = f"Cliente: {cliente_nome} - {flash_point}"
+                    for p in cell.paragraphs:
+                        for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
+                elif "Cidade:" in cell.text:
+                    cell.text = f"Cidade: {cidade}"
+                    for p in cell.paragraphs:
+                        for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
+                elif "Contato:" in cell.text:
+                    cell.text = f"Contato: {contato}"
+                    for p in cell.paragraphs:
+                        for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
+
+    # 2. Preencher a tabela de serviços original do seu documento
+    # Filtrar apenas linhas que possuem valor calculado válido
+    linhas_validas = [l for l in linhas_tabela if l.get("Valor") is not None and str(l.get("Valor")).strip() != ""]
+    
+    # Procuramos a tabela de serviços principal (geralmente a maior ou a que tem "Nº MAPA")
+    tabela_servicos = None
+    for t in doc.tables:
+        if len(t.rows) > 0 and "Nº MAPA" in t.rows[0].cells[0].text.upper():
+            tabela_servicos = t
+            break
             
-    # 2. Manipula a tabela nativa do seu arquivo Word
-    if doc.tables:
-        tabela = doc.tables[0]
+    if tabela_servicos:
+        num_linhas_originais = len(tabela_servicos.rows)
         
-        # O modelo possui o cabeçalho (linha 0). Removemos todas as outras linhas genéricas 
-        # que vêm abaixo dele no modelo original para limpar a tabela antiga.
-        while len(tabela.rows) > 1:
-            row = tabela.rows[1]
-            tabela._tbl.remove(row._tr)
+        # Preenche as linhas de dados existentes na tabela original do modelo
+        for i, linha in enumerate(linhas_validas):
+            idx_linha_destino = i + 1 # Ignora a linha 0 (cabeçalho)
             
-        # Agora inserimos apenas e estritamente as linhas que possuem valores definidos!
-        for linha in linhas_tabela:
-            # Se não tiver valor (duplicadas), o programa ignora e exclui a linha da OS
-            if linha.get("Valor") is None or str(linha.get("Valor")).strip() == "":
-                continue
+            # Se precisarmos de mais linhas do que o modelo já tem, adicionamos uma nova linha copiada
+            if idx_linha_destino >= len(tabela_servicos.rows):
+                row_cells = tabela_servicos.add_row().cells
+            else:
+                row_cells = tabela_servicos.rows[idx_linha_destino].cells
                 
-            row_cells = tabela.add_row().cells
             dados_linha = [
                 str(linha.get("Nº Mapa", "")),
                 str(linha.get("Data", "")),
@@ -112,28 +120,52 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
                 limpar_descricao_os(linha.get("Descrição", "")),
                 f"R$ {linha.get('Valor', '')}"
             ]
-            for idx, valor_celula in enumerate(dados_linha):
-                row_cells[idx].text = valor_celula
-                # Mantém fontes organizadas em Arial 10 dentro das células
-                for p in row_cells[idx].paragraphs:
-                    if idx in [0, 1, 3, 5]: # Códigos, datas, placas e preços centralizados
-                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    for r in p.runs:
-                        r.font.name = 'Arial'
-                        r.font.size = Pt(10)
+            
+            # Escreve em cada célula correspondente da linha
+            for idx_col, valor_celula in enumerate(dados_linha):
+                if idx_col < len(row_cells):
+                    row_cells[idx_col].text = valor_celula
+                    for p_cell in row_cells[idx_col].paragraphs:
+                        if idx_col in [0, 1, 3, 5]:
+                            p_cell.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        for r in p_cell.runs:
+                            r.font.name = 'Arial'
+                            r.font.size = Pt(10)
+                            
+        # EXCLUSÃO DAS LINHAS SOBRESSALENTES VAZIAS:
+        # Remove do modelo original todas as linhas vazias que sobraram abaixo dos dados inseridos
+        linha_inicio_remocao = len(linhas_validas) + 1
+        while len(tabela_servicos.rows) > linha_inicio_remocao:
+            linha_para_apagar = tabela_servicos.rows[linha_inicio_remocao]
+            tabela_servicos._tbl.remove(linha_para_apagar._tr)
 
-    # 3. Localiza o campo de Total no modelo original e atualiza o preço final acumulado
-    texto_total_formatado = f"TOTAL R$ {total_valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    # 3. Preencher o campo TOTAL localizado no final do seu modelo original
+    texto_total_formatado = f"R$ {total_valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    for t in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                if "TOTAL" in cell.text.upper():
+                    # Localiza a tabela ou linha do Total e atualiza a célula do valor
+                    cell.text = f"TOTAL: {texto_total_formatado}"
+                    for p in cell.paragraphs:
+                        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                        for run in p.runs:
+                            run.bold = True
+                            run.font.name = 'Arial'
+                            run.font.size = Pt(12)
+                            run.font.color.rgb = RGBColor(234, 88, 12)
+
+    # Se o total estiver em parágrafo comum fora de tabelas, atualiza também por segurança
     for p in doc.paragraphs:
-        if "TOTAL" in p.text:
-            p.text = "" # Limpa a linha estática antiga
-            run_total = p.add_run(texto_total_formatado)
-            run_total.bold = True
-            run_total.font.name = 'Arial'
-            run_total.font.size = Pt(12)
-            run_total.font.color.rgb = RGBColor(234, 88, 12) # Cor laranja em destaque
+        if "TOTAL" in p.text.upper():
+            p.text = f"TOTAL: {texto_total_formatado}"
+            for run in p.runs:
+                run.bold = True
+                run.font.name = 'Arial'
+                run.font.size = Pt(12)
+                run.font.color.rgb = RGBColor(234, 88, 12)
 
-    # Devolve o arquivo alterado em formato de bytes para download
+    # Salva o arquivo em memória mantendo a logo intacta
     target = io.BytesIO()
     doc.save(target)
     target.seek(0)
@@ -141,7 +173,7 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
 
 
 # ==============================================================================
-# --- ABA 1: LÓGICA DE PROCESSAMENTO DA PLANILHA ---
+# --- ABA 1: PROCESSAMENTO DA PLANILHA ---
 # ==============================================================================
 with aba1:
     arquivo_carregado = st.file_uploader(
@@ -220,7 +252,7 @@ with aba1:
                             placa_atual = str(linha.get("Placa", "")).strip()
 
                             if placa_atual in placas_vistas and placa_atual != "":
-                                linda_dict_valor = linha_dict["Valor"] = None
+                                linha_dict["Valor"] = None
                                 linhas_amarelas.append(contador_linha_excel)
                             else:
                                 if placa_atual != "":
@@ -249,8 +281,6 @@ with aba1:
                         lista_linhas.pop()
 
                     df_excel_final = pd.DataFrame(lista_linhas, columns=colunas_finais)
-                    st.session_state.df_excel_final = df_excel_final
-                    st.session_state.colunas_finais = colunas_finais
 
                     st.subheader("📋 Visualização Prévia dos Dados Processados")
                     st.dataframe(df_filtrado)
@@ -284,14 +314,14 @@ with aba1:
             st.error(f"Erro crítico no processamento: {e}")
 
 # ==============================================================================
-# --- ABA 2: PREENCHIMENTO E CONSULTA DA ORDEM DE SERVIÇO EM WORD ---
+# --- ABA 2: PREENCHIMENTO E CONSULTA DA ORDEM DE SERVIÇO ---
 # ==============================================================================
 with aba2:
     st.subheader("📄 Emissor de Ordem de Serviço com Base no Modelo Original")
     
-    # Botão obrigatório para carregar o seu arquivo Word de Modelo
+    # Campo para carregar seu arquivo sem qualquer modificação prévia
     modelo_word_carregado = st.file_uploader(
-        "Selecione o seu arquivo de modelo oficial (.docx):",
+        "Selecione o seu arquivo original 'MODELO - HYPER TORK PERFORMANCE.docx':",
         type=["docx"],
         key="uploader_modelo_word"
     )
@@ -299,7 +329,7 @@ with aba2:
     if st.session_state.df_filtrado is None or st.session_state.df_filtrado.empty:
         st.info("Aguardando o upload e processamento da planilha FPF_List na primeira aba para liberar o emissor.")
     elif modelo_word_carregado is None:
-        st.warning("Por favor, anexe o arquivo 'MODELO - HYPER TORK PERFORMANCE.docx' acima para que o robô possa preenchê-lo.")
+        st.warning("Por favor, anexe o arquivo original do seu modelo acima para habilitar o preenchimento automático.")
     else:
         df_base_os = st.session_state.df_filtrado
         bytes_modelo = modelo_word_carregado.read()
@@ -318,7 +348,7 @@ with aba2:
             flash_point_confirmacao = st.text_input("Flash Point Relacionado:", value=fp_selecionado, disabled=True)
             contato_input = st.text_input("Contato (Adicionar a critério do usuário):", placeholder="Ex: (45) 99999-9999")
             
-        st.write("### Serviços com Valores Definidos que farão parte desta OS (Linhas zeradas serão excluídas do Word):")
+        st.write("### Serviços com Valores Definidos que farão parte desta OS (Linhas vazias serão excluídas do Word):")
         
         linhas_os_finais = []
         placas_vistas_os = set()
@@ -338,7 +368,6 @@ with aba2:
             
             linhas_os_finais.append(row_dict)
             
-        # Filtra a tabela do preview da tela mantendo estritamente as linhas com valor definido
         df_preview_os = pd.DataFrame(linhas_os_finais)
         df_preview_os = df_preview_os[df_preview_os["Valor"].notna()].copy()
         df_preview_os["Descrição"] = df_preview_os["Descrição"].apply(limpar_descricao_os)
@@ -353,11 +382,11 @@ with aba2:
                 cliente_nome=nome_cliente_input,
                 cidade=cidade_input,
                 contato=contato_input,
-                linhas_tabela=linhas_os_finais, # A função filtra as vazias na gravação
+                linhas_tabela=linhas_os_finais,
                 total_valor=soma_total_os
             )
             
-            st.success(f"Ordem de Serviço para o Flash Point {fp_selecionado} gerada com sucesso mantendo o seu modelo original!")
+            st.success(f"Ordem de Serviço para o Flash Point {fp_selecionado} gerada com sucesso!")
             
             st.download_button(
                 label="📥 Baixar Ordem de Serviço Pronta (.docx)",
