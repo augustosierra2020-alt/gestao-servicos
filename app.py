@@ -72,7 +72,6 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
     
     # 1. Preencher os dados do Cabeçalho sem apagar o texto original
     for t in doc.tables:
-        # Verifica se é a tabela pequena do cabeçalho que contém "Cliente:"
         for row in t.rows:
             for cell in row.cells:
                 if "Cliente:" in cell.text:
@@ -89,10 +88,9 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
                         for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
 
     # 2. Preencher a tabela de serviços original do seu documento
-    # Filtrar apenas linhas que possuem valor calculado válido
     linhas_validas = [l for l in linhas_tabela if l.get("Valor") is not None and str(l.get("Valor")).strip() != ""]
     
-    # Procuramos a tabela de serviços principal (geralmente a maior ou a que tem "Nº MAPA")
+    # Procuramos a tabela de serviços principal (a que tem "Nº MAPA")
     tabela_servicos = None
     for t in doc.tables:
         if len(t.rows) > 0 and "Nº MAPA" in t.rows[0].cells[0].text.upper():
@@ -131,33 +129,37 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
                             r.font.size = Pt(10)
                             
         # EXCLUSÃO DAS LINHAS SOBRESSALENTES VAZIAS:
-        # Remove do modelo original todas as linhas vazias que sobraram abaixo dos dados inseridos
         linha_inicio_remocao = len(linhas_validas) + 1
         while len(tabela_servicos.rows) > linha_inicio_remocao:
             linha_para_apagar = tabela_servicos.rows[linha_inicio_remocao]
             tabela_servicos._tbl.remove(linha_para_apagar._tr)
 
-    # 3. Preencher o campo TOTAL localizado no final do seu modelo original
-    texto_total_formatado = f"R$ {total_valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    # 3. INTERAÇÃO PREVENTIVA E CIRÚRGICA PARA O CAMPO DO TOTAL (Caixa R$)
+    # Formata o número para o padrão nacional de moeda (Ex: 1.750,00)
+    valor_formatado_texto = f"{total_valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     
-    # Varre tabelas procurando a palavra TOTAL
+    # Busca por tabelas que contenham a linha do TOTAL e a caixa de texto do R$ ao lado
     for t in doc.tables:
         for row in t.rows:
-            for cell in row.cells:
-                if "TOTAL" in cell.text.upper():
-                    cell.text = f"TOTAL: {texto_total_formatado}"
-                    for p in cell.paragraphs:
-                        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-                        for run in p.runs:
-                            run.bold = True
-                            run.font.name = 'Arial'
-                            run.font.size = Pt(12)
-                            run.font.color.rgb = RGBColor(234, 88, 12)
+            # Varre as células da linha
+            contem_total = any("TOTAL" in cell.text.upper() for cell in row.cells)
+            if contem_total:
+                for cell in row.cells:
+                    # Alvo: Encontra a caixa/célula que tem o símbolo "R$" na frente de TOTAL
+                    if "R$" in cell.text or cell.text.strip() == "":
+                        cell.text = f"R$ {valor_formatado_texto}"
+                        for p in cell.paragraphs:
+                            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                            for run in p.runs:
+                                run.bold = True
+                                run.font.name = 'Arial'
+                                run.font.size = Pt(12)
+                                run.font.color.rgb = RGBColor(234, 88, 12) # Laranja corporativo
 
-    # Varre parágrafos comuns procurando a palavra TOTAL (Garante o preenchimento)
+    # Varre parágrafos comuns por redundância (garantindo que se houver texto solto "TOTAL, R$", ele trate)
     for p in doc.paragraphs:
-        if "TOTAL" in p.text.upper():
-            p.text = f"TOTAL: {texto_total_formatado}"
+        if "TOTAL" in p.text.upper() and "R$" in p.text:
+            p.text = f"TOTAL: R$ {valor_formatado_texto}"
             for run in p.runs:
                 run.bold = True
                 run.font.name = 'Arial'
@@ -296,11 +298,11 @@ with aba1:
 
                         for num_linha in linhas_amarelas:
                             for col_idx in range(1, len(colunas_finais) + 1):
-                                worksheet.cell(row=num_linha, column=col_idx).fill = amarelo_claro
+                                worksheet.cell(row=num_linha, column=col_idx).fill = yellow_claro = amarelo_claro
 
                         for num_linha in linhas_laranjas:
                             for col_idx in range(1, len(colunas_finais) + 1):
-                                worksheet.cell(row=num_linha, column=col_idx).fill = laranja_claro
+                                worksheet.cell(row=num_linha, column=col_idx).fill = orange_claro = laranja_claro
 
                     st.success("Planilha processada com sucesso na memória! Vá para a aba ao lado para gerar Ordens de Serviço.")
                     st.download_button(
@@ -340,7 +342,7 @@ with aba2:
         
         col1, col2 = st.columns(2)
         with col1:
-            nome_cliente_input = st.text_input("Cliente (Preenchido Automatically):", value=cliente_sugerido)
+            nome_cliente_input = st.text_input("Cliente (Preenchido Automaticamente):", value=cliente_sugerido)
             cidade_input = st.text_input("Cidade (Adicionar a critério do usuário):", placeholder="Ex: Cascavel - PR")
         with col2:
             flash_point_confirmacao = st.text_input("Flash Point Relacionado:", value=fp_selecionado, disabled=True)
