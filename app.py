@@ -201,6 +201,7 @@ with aba1:
                     st.warning("Aviso: A coluna 'T' não foi encontrada.")
                     df_filtrado = df.copy()
 
+                # Adicionado "Cliente" explicitamente na captura inicial de colunas
                 colunas_originais = ["Arquivo ID", "Fabricante", "Matrícula", "FlashPoint", "Cliente", "Nome arquivo", "Dada"]
                 colunas_existentes = [col for col in colunas_originais if col in df_filtrado.columns]
                 df_filtrado = df_filtrado[colunas_existentes].copy()
@@ -217,15 +218,14 @@ with aba1:
                 }
                 df_filtrado = df_filtrado.rename(columns=dicionario_renomear)
 
-                ordem_solicitada = ["Nº Mapa", "Data", "Veículo", "Placa", "Flash Point", "Descrição", "Valor"]
+                # --- ALTERAÇÃO SOLICITADA: Incluído 'Cliente' exatamente entre 'Flash Point' e 'Descrição' ---
+                ordem_solicitada = ["Nº Mapa", "Data", "Veículo", "Placa", "Flash Point", "Cliente", "Descrição", "Valor"]
                 colunas_finais = [col for col in ordem_solicitada if col in df_filtrado.columns]
                 df_filtrado = df_filtrado[colunas_finais].copy()
 
-                # --- NOVO: AJUSTE E FORMATAÇÃO DA DATA PARA O PADRÃO BRASIL (DD/MM/AAAA) ---
+                # Ajuste e formatação da data para o padrão Brasil
                 if "Data" in df_filtrado.columns:
-                    # Converte para o tipo datetime do pandas de forma segura e depois formata
                     df_filtrado["Data"] = pd.to_datetime(df_filtrado["Data"], errors='coerce')
-                    # Transforma no padrão brasileiro (dia/mês/ano de 4 dígitos) descartando horários em branco
                     df_filtrado["Data"] = df_filtrado["Data"].dt.strftime('%d/%m/%Y').fillna("")
 
                 # Força a coluna Flash Point a virar Texto/String pura
@@ -263,6 +263,9 @@ with aba1:
 
                         linha_total = {col: "" for col in colunas_finais}
                         linha_total["Flash Point"] = fp
+                        # Se a coluna 'Cliente' existir no mapeamento final, mantém o nome do cliente na linha do total
+                        if "Cliente" in linha_total:
+                            linha_total["Cliente"] = str(bloco.iloc[0].get("Cliente", ""))
                         linha_total["Descrição"] = "VALOR TOTAL:"
                         linha_total["Valor"] = float(soma_bloco) if soma_bloco > 0 else ""
 
@@ -369,7 +372,11 @@ with aba2:
         df_preview_os = df_preview_os[df_preview_os["Valor"].notna()].copy()
         df_preview_os["Descrição"] = df_preview_os["Descrição"].apply(limpar_descricao_os)
         
-        st.dataframe(df_preview_os[["Nº Mapa", "Data", "Veículo", "Placa", "Descrição", "Valor"]])
+        # Exibição do preview mantendo o controle das colunas que vão para a tela
+        colunas_preview_os = ["Nº Mapa", "Data", "Veículo", "Placa", "Descrição", "Valor"]
+        colunas_preview_existentes = [c for c in colunas_preview_os if c in df_preview_os.columns]
+        st.dataframe(df_preview_os[colunas_preview_existentes])
+        
         st.metric(label="Valor Total Consolidado da OS (Apenas linhas válidas)", value=f"R$ {soma_total_os:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
         
         if st.button("🚀 Preencher e Gerar Ordem de Serviço"):
