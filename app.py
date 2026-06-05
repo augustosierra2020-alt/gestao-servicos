@@ -1,400 +1,793 @@
-import io
-import re
-import pandas as pd
 import streamlit as st
-from openpyxl.styles import PatternFill
-from docx import Document
-from docx.shared import Pt, RGBColor
-from docx.enum.text import WD_ALIGN_PARAGRAPH
+import pandas as pd
+import random
+from datetime import datetime, timedelta
+import json
+import hashlib
+from streamlit_gsheets import GSheetsConnection
+import extra_streamlit_components as stx
 
-# Configuração da página do Streamlit...
-st.set_page_config(
-    page_title="Gestão de Serviços & OS - Hyper Tork", page_icon="📊", layout="wide"
-)
+# --- CONFIGURAÇÃO INICIAL DA PÁGINA ---
+st.set_page_config(page_title="Gestão de Designações e Partes", layout="wide", initial_sidebar_state="expanded")
 
-st.title("📊 Gestão de Serviços & Emissão de OS")
-st.write(
-    "Filtragem, cálculo de valores, remoção de duplicadas por Matrícula e preenchimento automático do modelo Word da Hyper Tork."
-)
+# --- CONFIGURAÇÃO DE ADMINISTRADOR MASTER ---
+EMAIL_ADMIN = "augustosierra2020@gmail.com"
 
-# Criando abas para organizar o fluxo do sistema
-aba1, aba2 = st.tabs(["📋 Processamento da Planilha", "📄 Gerar Ordem de Serviço"])
+# --- 🛡️ FUNÇÕES DE BLINDAGEM (PROGRAMAÇÃO DEFENSIVA) ---
+def formatar_data_segura(serie_datas):
+    """Amortecedor global para datas: Tenta converter e formatar de forma segura."""
+    try:
+        return pd.to_datetime(serie_datas, dayfirst=True, errors="coerce").dt.strftime("%d/%m/%Y").fillna("")
+    except Exception:
+        return serie_datas.astype(str)
 
-if "df_filtrado" not in st.session_state:
-    st.session_state.df_filtrado = None
+def normalizar_tabela(df):
+    """Garante que os tipos de dados sejam puros e exatos, evitando falhas do Streamlit"""
+    if df is None or df.empty:
+        return pd.DataFrame({
+            "Grupo": pd.Series(dtype="string"),
+            "Tarefa": pd.Series(dtype="string"),
+            "Data de Trabalho": pd.Series(dtype="datetime64[ns]"),
+            "Principal": pd.Series(dtype="string"),
+            "Ajudante": pd.Series(dtype="string"),
+            "Data de Registro": pd.Series(dtype="string")
+        })
+    
+    df = df.copy()
+    
+    try:
+        df["Data de Trabalho"] = pd.to_datetime(df["Data de Trabalho"], dayfirst=True, errors="coerce")
+        df["Data de Trabalho"] = df["Data de Trabalho"].fillna(pd.Timestamp("today").normalize())
+    except Exception:
+        pass 
+    
+    colunas_texto = ["Grupo", "Tarefa", "Principal", "Ajudante", "Data de Registro"]
+    for col in colunas_texto:
+        if col in df.columns:
+            df[col] = df[col].astype(str).replace(["nan", "NaN", "NaT", "None", "<NA>"], "")
+            
+    return df
 
-# --- FUNÇÃO DE CÁLCULO DE VALOR ---
-def calcular_valor_inicial(linha):
-    descricao = str(linha.get("Nome arquivo", "")).upper().strip()
-    veiculo = str(linha.get("Fabricante", "")).upper().strip()
+# --- 🛡️ INICIALIZAÇÃO DE MEMÓRIA ---
+if "user_id" not in st.session_state:
+    st.session_state.user_id = None
+if "user_nome" not in st.session_state:
+    st.session_state.user_nome = None
+if "user_email" not in st.session_state:
+    st.session_state.user_email = None
+if "view_mode" not in st.session_state:
+    st.session_state.view_mode = "app" 
+if "escala_temporaria" not in st.session_state:
+    st.session_state.escala_temporaria = None
+if "deslogado" not in st.session_state:
+    st.session_state.deslogado = False
+if "historico_definitivo" not in st.session_state:
+    st.session_state.historico_definitivo = normalizar_tabela(pd.DataFrame())
+if "historico_carregado" not in st.session_state:
+    st.session_state.historico_carregado = False
+if "admin_verificado" not in st.session_state:
+    st.session_state.admin_verificado = False
 
-    descricao = re.sub(r"\s+", " ", descricao)
-    veiculo = re.sub(r"\s+", " ", veiculo)
+# --- FUNÇÃO DE HORÁRIO (BRASÍLIA) ---
+def get_horario_brasilia():
+    return (datetime.utcnow() - timedelta(hours=3)).strftime("%d/%m/%Y %H:%M:%S")
 
-    termos_stg2 = ["STG2", "STG 2", "STAG2", "STAG 2"]
-    termos_mod_off = ["MOD", "OFF"]
+# --- CONEXÃO COM O GOOGLE SHEETS ---
+conn_sheets = st.connection("gsheets", type=GSheetsConnection)
 
-    fabricantes_especiais = [
-        "NEW HOLLAND", "VALTRA", "CASE IH", "CASE", "MASSEY FERGUSSON", 
-        "MASSEY", "CLAAS", "JHON DEERE", "JOHN DEERE", "DEERE", 
-        "FENDT", "JACTO", "DOPPSTADT", "JAN", "VOLVO CONSTRUCTION EQUIPMENT", 
-        "VOLVO CONSTRUCTION", "VOLVO CE"
-    ]
+# 🚀 CACHE E LEITURA OTIMIZADA COM BLINDAGEM
+@st.cache_data(ttl=300, show_spinner=False)
+def carregar_aba(aba_nome):
+    try:
+        import requests
+        URL_DO_SCRIPT = st.secrets["connections"]["gsheets"].get("script_url", "")
+        if URL_DO_SCRIPT:
+            payload = {"action": "read", "aba": aba_nome}
+            response = requests.post(URL_DO_SCRIPT, json=payload, timeout=10)
+            if response.status_code == 200:
+                try:
+                    res_json = response.json()
+                    if res_json.get("status") == "success":
+                        dados = res_json.get("dados", [])
+                        if dados:
+                            df = pd.DataFrame(dados)
+                            df.columns = df.columns.str.strip().str.lower()
+                            return df
+                except ValueError:
+                    pass
+    except Exception:
+        pass
+        
+    try:
+        df = conn_sheets.read(worksheet=aba_nome, ttl=0)
+        if df is not None and not df.empty:
+            df.columns = df.columns.str.strip().str.lower()
+            df = df.dropna(how='all').reset_index(drop=True)
+            return df
+    except Exception:
+        pass
+    return pd.DataFrame()
 
-    eh_especial = any(fab in veiculo for fab in fabricantes_especiais)
-    if "VOLVO TRUCK" in veiculo:
-        eh_especial = False
+def salvar_aba(df, aba_nome):
+    try:
+        import requests
+        URL_DO_SCRIPT = st.secrets["connections"]["gsheets"].get("script_url", "")
+        if URL_DO_SCRIPT:
+            if "id" in df.columns:
+                df["id"] = pd.to_numeric(df["id"], errors='coerce').fillna(0).astype(int)
+            payload = {"action": "write", "aba": aba_nome, "dados": df.to_json(orient="records", date_format="iso")}
+            response = requests.post(URL_DO_SCRIPT, json=payload, timeout=10)
+            if response.status_code == 200:
+                carregar_aba.clear(aba_nome)
+                return True
+    except Exception as e:
+        st.error(f"Erro ao salvar na nuvem: {e}")
+    return False
 
-    if any(termo in descricao for termo in termos_stg2):
-        return 1400 if eh_especial else 650
-    elif any(termo in descricao for termo in termos_mod_off):
-        return 700 if eh_especial else 350
+# --- FUNÇÕES DE SEGURANÇA E GERENCIAMENTO ---
+def hash_senha(senha):
+    return hashlib.sha256(senha.encode()).hexdigest()
 
+def inicializar_admin_master():
+    df_usuarios = carregar_aba("usuarios")
+    colunas_ordem = ["id", "nome", "email", "senha", "grupos_json"]
+    
+    if df_usuarios.empty or "email" not in df_usuarios.columns:
+        admin_fixo = pd.DataFrame([{
+            "id": 1,
+            "nome": "Sérgio Sierra",
+            "email": EMAIL_ADMIN.strip().lower(),
+            "senha": hash_senha("adm01"),
+            "grupos_json": json.dumps({})
+        }])
+        salvar_aba(admin_fixo[colunas_ordem], "usuarios")
+    else:
+        df_usuarios["email"] = df_usuarios["email"].astype(str).str.strip().str.lower()
+        if not (df_usuarios["email"] == EMAIL_ADMIN.lower()).any():
+            try:
+                ids_validos = pd.to_numeric(df_usuarios["id"], errors='coerce').dropna()
+                novo_id = int(ids_validos.max()) + 1 if not ids_validos.empty else 1
+            except:
+                novo_id = len(df_usuarios) + 1
+                
+            admin_fixo = pd.DataFrame([{
+                "id": int(novo_id),
+                "nome": "Sérgio Sierra",
+                "email": EMAIL_ADMIN.strip().lower(),
+                "senha": hash_senha("adm01"),
+                "grupos_json": json.dumps({})
+            }])
+            df_usuarios = pd.concat([df_usuarios, admin_fixo], ignore_index=True)
+            salvar_aba(df_usuarios[colunas_ordem], "usuarios")
+
+if not st.session_state.admin_verificado:
+    inicializar_admin_master()
+    st.session_state.admin_verificado = True
+
+def cadastrar_usuario(nome, email, senha):
+    df_usuarios = carregar_aba("usuarios")
+    colunas_ordem = ["id", "nome", "email", "senha", "grupos_json"]
+    
+    if df_usuarios.empty or "email" not in df_usuarios.columns:
+        df_usuarios = pd.DataFrame(columns=colunas_ordem)
+        novo_id = 1
+    else:
+        df_usuarios["email"] = df_usuarios["email"].astype(str).str.strip().str.lower()
+        df_usuarios["nome"] = df_usuarios["nome"].astype(str).str.strip().str.lower()
+        
+        if (df_usuarios["email"] == email.strip().lower()).any():
+            return "email_duplicado"
+        if (df_usuarios["nome"] == nome.strip().lower()).any():
+            return "nome_duplicado"
+            
+        try:
+            ids_validos = pd.to_numeric(df_usuarios["id"], errors='coerce').dropna()
+            novo_id = int(ids_validos.max()) + 1 if not ids_validos.empty else len(df_usuarios) + 1
+        except:
+            novo_id = len(df_usuarios) + 1
+    
+    novo_registro = pd.DataFrame([{
+        "id": int(novo_id),
+        "nome": nome.strip(),
+        "email": email.strip().lower(),
+        "senha": hash_senha(senha.strip()),
+        "grupos_json": json.dumps({})
+    }])
+    
+    df_usuarios = carregar_aba("usuarios")
+    if df_usuarios.empty:
+        df_usuarios = novo_registro[colunas_ordem]
+    else:
+        df_usuarios = df_usuarios[colunas_ordem]
+        novo_registro = novo_registro[colunas_ordem]
+        df_usuarios = pd.concat([df_usuarios, novo_registro], ignore_index=True)
+        
+    if salvar_aba(df_usuarios, "usuarios"):
+        return "sucesso"
+    return "erro_salvar"
+
+def verificar_login(email, senha):
+    email_limpo = email.strip().lower()
+    senha_limpa = senha.strip()
+    
+    df_usuarios = carregar_aba("usuarios")
+    if not df_usuarios.empty and "email" in df_usuarios.columns and "senha" in df_usuarios.columns:
+        df_usuarios["email"] = df_usuarios["email"].astype(str).str.strip().str.lower()
+        df_usuarios["senha"] = df_usuarios["senha"].astype(str).str.strip()
+        
+        user_row = df_usuarios[df_usuarios["email"] == email_limpo]
+        if not user_row.empty:
+            if email_limpo == EMAIL_ADMIN.lower():
+                if user_row.iloc[0]["senha"] == hash_senha(senha_limpa) or senha_limpa == "adm01":
+                    return user_row.iloc[0].to_dict()
+            else:
+                if user_row.iloc[0]["senha"] == hash_senha(senha_limpa):
+                    return user_row.iloc[0].to_dict()
+
+    if email_limpo == EMAIL_ADMIN.lower() and senha_limpa == "adm01":
+        return {"id": 1, "nome": "Sérgio Sierra", "email": EMAIL_ADMIN.lower(), "grupos_json": json.dumps({})}
     return None
 
-# --- FUNÇÃO PARA FILTRAR APENAS OS TERMOS SOLICITADOS NA DESCRIÇÃO ---
-def limpar_descricao_os(desc_original):
-    desc_upper = str(desc_original).upper().strip()
-    if "STAG 2" in desc_upper or "STAG2" in desc_upper:
-        return "STAG 2"
-    elif "STG 2" in desc_upper or "STG2" in desc_upper:
-        return "STG 2"
-    elif "MOD" in desc_upper:
-        return "MOD"
-    elif "OFF" in desc_upper:
-        return "OFF"
-    return desc_original
+def buscar_usuario_por_id(user_id):
+    if int(user_id) == 1:
+        df_usuarios = carregar_aba("usuarios")
+        if not df_usuarios.empty and "id" in df_usuarios.columns:
+            user = df_usuarios[pd.to_numeric(df_usuarios["id"], errors='coerce') == 1]
+            if not user.empty:
+                return user.iloc[0].to_dict()
+        return {"id": 1, "nome": "Sérgio Sierra", "email": EMAIL_ADMIN.lower(), "grupos_json": json.dumps({})}
 
-# --- FUNÇÃO QUE EDITA DIRETAMENTE O SEU ARQUIVO ORIGINAL ---
-def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, contato, linhas_tabela, total_valor):
-    doc = Document(io.BytesIO(modelo_bytes))
-    
-    # 1. Preencher os dados do Cabeçalho estritamente na caixa/célula da frente
-    for t in doc.tables:
-        for row in t.rows:
-            if len(row.cells) >= 2:
-                texto_celula_1 = row.cells[0].text.upper().strip()
-                
-                if "CLIENTE:" in texto_celula_1:
-                    row.cells[1].text = f"{cliente_nome} - {flash_point}"
-                    for p in row.cells[1].paragraphs:
-                        for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
-                        
-                elif "CIDADE:" in texto_celula_1:
-                    row.cells[1].text = cidade
-                    for p in row.cells[1].paragraphs:
-                        for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
-                        
-                elif "CONTATO:" in texto_celula_1:
-                    row.cells[1].text = contato
-                    for p in row.cells[1].paragraphs:
-                        for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
+    df_usuarios = carregar_aba("usuarios")
+    if df_usuarios.empty or "id" not in df_usuarios.columns:
+        return None
+    user = df_usuarios[pd.to_numeric(df_usuarios["id"], errors='coerce') == int(user_id)]
+    if not user.empty:
+        return user.iloc[0].to_dict()
+    return None
 
-    # 2. Preencher a tabela de serviços original do seu documento
-    linhas_validas = [l for l in linhas_tabela if l.get("Valor") is not None and str(l.get("Valor")).strip() != "" and str(l.get("Valor")).lower() != "nan"]
+# --- FUNÇÕES DO HISTÓRICO EM BLOCOS ---
+def acrescentar_historico_db(user_id, df_novo_bloco):
+    df_global = carregar_aba("historico")
+    novos_registros = []
+    proximo_id = 1 if df_global.empty or "id" not in df_global.columns else int(df_global["id"].max()) + 1
     
-    tabela_servicos = None
-    for t in doc.tables:
-        if len(t.rows) > 0 and "Nº MAPA" in t.rows[0].cells[0].text.upper():
-            tabela_servicos = t
+    for _, row in df_novo_bloco.iterrows():
+        dt_val = row['Data de Trabalho']
+        if isinstance(dt_val, pd.Timestamp) or isinstance(dt_val, datetime):
+            data_str = dt_val.strftime("%Y-%m-%d")
+        else:
+            try: data_str = pd.to_datetime(dt_val, dayfirst=True).strftime("%Y-%m-%d")
+            except: data_str = str(dt_val)
+
+        novos_registros.append({
+            "id": proximo_id,
+            "user_id": int(user_id),
+            "grupo": str(row.get('Grupo', '')),
+            "tarefa": str(row.get('Tarefa', '')),
+            "data_trabalho": data_str,
+            "principal": str(row.get('Principal', '')),
+            "ajudante": str(row.get('Ajudante', '')),
+            "data_registro": str(row.get('Data de Registro', get_horario_brasilia()))
+        })
+        proximo_id += 1
+        
+    if novos_registros:
+        df_novos = pd.DataFrame(novos_registros)
+        if df_global.empty:
+            df_global = df_novos
+        else:
+            df_global = pd.concat([df_global, df_novos], ignore_index=True)
+        salvar_aba(df_global, "historico")
+
+def atualizar_historico_completo_db(user_id, df_historico_completo):
+    df_global = carregar_aba("historico")
+    if not df_global.empty and "user_id" in df_global.columns:
+        df_global = df_global[df_global["user_id"] != int(user_id)]
+        
+    novos_registros = []
+    proximo_id = 1 if df_global.empty or "id" not in df_global.columns else int(df_global["id"].max()) + 1
+    
+    for _, row in df_historico_completo.iterrows():
+        dt_val = row['Data de Trabalho']
+        if isinstance(dt_val, pd.Timestamp) or isinstance(dt_val, datetime):
+            data_str = dt_val.strftime("%Y-%m-%d")
+        else:
+            try: data_str = pd.to_datetime(dt_val, dayfirst=True).strftime("%Y-%m-%d")
+            except: data_str = str(dt_val)
+
+        novos_registros.append({
+            "id": proximo_id,
+            "user_id": int(user_id),
+            "grupo": str(row.get('Grupo', '')),
+            "tarefa": str(row.get('Tarefa', '')),
+            "data_trabalho": data_str,
+            "principal": str(row.get('Principal', '')),
+            "ajudante": str(row.get('Ajudante', '')),
+            "data_registro": str(row.get('Data de Registro', get_horario_brasilia()))
+        })
+        proximo_id += 1
+        
+    if novos_registros:
+        df_novos = pd.DataFrame(novos_registros)
+        if df_global.empty:
+            df_global = df_novos
+        else:
+            df_global = pd.concat([df_global, df_novos], ignore_index=True)
+            
+    salvar_aba(df_global, "historico")
+
+def carregar_historico_db(user_id):
+    df_global = carregar_aba("historico")
+    if df_global.empty or "user_id" not in df_global.columns:
+        return normalizar_tabela(pd.DataFrame())
+        
+    df_user = df_global[df_global["user_id"] == int(user_id)].copy()
+    if df_user.empty:
+        return normalizar_tabela(pd.DataFrame())
+        
+    df_user = df_user.rename(columns={
+        "grupo": "Grupo", "tarefa": "Tarefa", "data_trabalho": "Data de Trabalho",
+        "principal": "Principal", "ajudante": "Ajudante", "data_registro": "Data de Registro"
+    })
+    
+    return normalizar_tabela(df_user[["Grupo", "Tarefa", "Data de Trabalho", "Principal", "Ajudante", "Data de Registro"]])
+
+# --- FUNÇÕES EXCLUSIVAS DO ADMIN ---
+def listar_todos_usuarios():
+    df_usuarios = carregar_aba("usuarios")
+    if df_usuarios.empty:
+        return pd.DataFrame(columns=["id", "Nome", "Email"])
+    
+    df_exibir = df_usuarios[["id", "nome", "email"]].copy()
+    df_exibir["email"] = df_exibir["email"].astype(str).str.strip()
+    
+    is_admin = df_exibir["email"].str.lower() == EMAIL_ADMIN.lower()
+    df_exibir.loc[is_admin, "nome"] = "👑 " + df_exibir.loc[is_admin, "nome"]
+    
+    return df_exibir.rename(columns={"nome": "Nome", "email": "Email"})
+
+def listar_todo_historico_admin():
+    df_historico = carregar_aba("historico")
+    df_usuarios = carregar_aba("usuarios")
+    
+    if df_historico.empty or df_usuarios.empty:
+        return pd.DataFrame()
+        
+    df_merge = df_historico.merge(df_usuarios, left_on="user_id", right_on="id", suffixes=('_hist', '_user'))
+    df_merge = df_merge.sort_values(by="id_hist", ascending=False)
+    
+    return df_merge[["nome", "email", "grupo", "tarefa", "data_trabalho", "principal", "ajudante", "data_registro"]].rename(
+        columns={
+            "nome": "Usuário", "email": "Email", "grupo": "Grupo", "tarefa": "Tarefa",
+            "data_trabalho": "Data do Evento", "principal": "Principal", "ajudante": "Ajudante", "data_registro": "Salvo em"
+        }
+    )
+
+def deletar_usuario_admin(user_id):
+    df_usuarios = carregar_aba("usuarios")
+    df_historico = carregar_aba("historico")
+    
+    if not df_usuarios.empty:
+        user_para_deletar = df_usuarios[df_usuarios["id"] == int(user_id)]
+        if not user_para_deletar.empty:
+            email_alvo = str(user_para_deletar.iloc[0]["email"]).strip().lower()
+            if email_alvo == EMAIL_ADMIN.lower() or int(user_id) == 1:
+                return False
+            
+        df_usuarios = df_usuarios[df_usuarios["id"] != int(user_id)]
+        salvar_aba(df_usuarios, "usuarios")
+    if not df_historico.empty:
+        df_historico = df_historico[df_historico["user_id"] != int(user_id)]
+        salvar_aba(df_historico, "historico")
+    return True
+
+def atualizar_nome_usuario_admin(user_id, novo_nome):
+    df_usuarios = carregar_aba("usuarios")
+    if not df_usuarios.empty:
+        idx = df_usuarios[df_usuarios["id"] == int(user_id)].index
+        if len(idx) > 0:
+            df_usuarios.loc[idx, "nome"] = novo_nome.strip()
+            salvar_aba(df_usuarios, "usuarios")
+
+def salvar_grupos_db(user_id, grupos_dict):
+    df_usuarios = carregar_aba("usuarios")
+    if not df_usuarios.empty:
+        idx = df_usuarios[df_usuarios["id"] == int(user_id)].index
+        if len(idx) > 0:
+            df_usuarios.loc[idx, "grupos_json"] = json.dumps(grupos_dict)
+            salvar_aba(df_usuarios, "usuarios")
+
+@st.dialog("🔒 Autenticação Restrita")
+def pop_up_senha_adm():
+    st.write("Por favor, insira a Senha do ADM para acessar o painel administrativo.")
+    senha_inserida = st.text_input("Senha do ADM:", type="password")
+    
+    if st.button("Confirmar Acesso", type="primary", use_container_width=True):
+        if senha_inserida == "adm01":
+            st.session_state.view_mode = "admin"
+            st.rerun()
+        else:
+            st.error("Senha incorreta! Acesso negado.")
+
+def gerar_escala_sem_repeticao(membros):
+    if len(membros) < 2:
+        return None
+        
+    principais = membros.copy()
+    random.shuffle(principais)
+    ajudantes = membros.copy()
+    
+    tentativas = 0
+    while tentativas < 1000:
+        random.shuffle(ajudantes)
+        valido = True
+        for p, a in zip(principais, ajudantes):
+            if p == a:
+                valido = False
+                break
+        if valido:
             break
-            
-    if tabela_servicos:
-        for i, linha in enumerate(linhas_validas):
-            idx_linha_destino = i + 1
-            
-            if idx_linha_destino >= len(tabela_servicos.rows):
-                row_cells = tabela_servicos.add_row().cells
-            else:
-                row_cells = tabela_servicos.rows[idx_linha_destino].cells
+        tentativas += 1
+        
+    scale_data = []
+    for p, a in zip(principais, ajudantes):
+        scale_data.append({
+            "Principal": p,
+            "Ajudante": a,
+            "Data de Trabalho": pd.Timestamp("today").normalize() 
+        })
+    return pd.DataFrame(scale_data)
+
+# --- 🚀 GERENCIAMENTO DE COOKIES E LOGIN COM AGENDAMENTO ---
+cookie_manager = stx.CookieManager(key="gerenciador_cookies")
+
+# 1. PROCESSA SALVAMENTO DE COOKIE AGENDADO (Dribla o bug do st.rerun)
+if "set_cookie_now" in st.session_state:
+    uid = st.session_state.pop("set_cookie_now")
+    validade = datetime.now() + timedelta(days=30)
+    cookie_manager.set("user_id", str(uid), expires_at=validade)
+
+# 2. PROCESSA EXCLUSÃO DE COOKIE AGENDADA
+if "delete_cookie_now" in st.session_state:
+    st.session_state.pop("delete_cookie_now")
+    cookie_manager.delete("user_id")
+
+# 3. VERIFICA SE O USUÁRIO JÁ TEM COOKIE SALVO PARA LOGIN AUTOMÁTICO
+cookie_user_id = cookie_manager.get(cookie="user_id")
+if cookie_user_id is not None and st.session_state.user_id is None and not st.session_state.deslogado:
+    usuario = buscar_usuario_por_id(int(cookie_user_id))
+    if usuario:
+        st.session_state.user_id = int(usuario["id"])
+        st.session_state.user_nome = usuario["nome"]
+        st.session_state.user_email = usuario["email"]
+        st.session_state.grupos = json.loads(usuario["grupos_json"]) if usuario["grupos_json"] else {}
+        st.session_state.historico_definitivo = carregar_historico_db(st.session_state.user_id)
+        st.session_state.historico_carregado = True
+        st.rerun()
+
+if st.session_state.user_id is not None and not st.session_state.historico_carregado:
+    st.session_state.historico_definitivo = carregar_historico_db(st.session_state.user_id)
+    st.session_state.historico_carregado = True
+
+# --- INTERFACE: TELA DESLOGADO ---
+if st.session_state.user_id is None:
+    st.title("🔐 Bem-vindo ao Sistema de Designações")
+    st.markdown("Faça login ou crie uma conta. Todos os seus dados serão armazenados de forma segura na nuvem.")
+    
+    aba_login, aba_cadastro = st.tabs(["Entrar", "Criar Conta"])
+    
+    with aba_login:
+        st.subheader("Fazer Login")
+        email_login = st.text_input("Email", key="login_email")
+        senha_login = st.text_input("Senha", type="password", key="login_senha")
+        manter_logado = st.checkbox("Lembrar meu acesso", value=True)
+        
+        if st.button("Entrar", type="primary", use_container_width=True):
+            usuario = verificar_login(email_login, senha_login)
+            if usuario:
+                st.session_state.user_id = int(usuario["id"])
+                st.session_state.user_nome = usuario["nome"]
+                st.session_state.user_email = usuario["email"]
+                st.session_state.grupos = json.loads(usuario["grupos_json"]) if usuario["grupos_json"] else {}
+                st.session_state.historico_definitivo = carregar_historico_db(st.session_state.user_id)
+                st.session_state.historico_carregado = True
+                st.session_state.deslogado = False 
                 
-            dados_linha = [
-                str(linha.get("Nº Mapa", "")),
-                str(linha.get("Data", "")),
-                str(linha.get("Veículo", "")),
-                str(linha.get("Placa", "")),
-                limpar_descricao_os(linha.get("Descrição", "")),
-                f"R$ {linha.get('Valor', '')}"
-            ]
-            
-            for idx_col, valor_celula in enumerate(dados_linha):
-                if idx_col < len(row_cells):
-                    row_cells[idx_col].text = valor_celula
-                    for p_cell in row_cells[idx_col].paragraphs:
-                        if idx_col in [0, 1, 3, 5]:
-                            p_cell.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        for r in p_cell.runs:
-                            r.font.name = 'Arial'
-                            r.font.size = Pt(10)
-                            
-        # EXCLUSÃO DAS LINHAS SOBRESSALENTES VAZIAS
-        linha_inicio_remocao = len(linhas_validas) + 1
-        while len(tabela_servicos.rows) > linha_inicio_remocao:
-            linha_para_apagar = tabela_servicos.rows[linha_inicio_remocao]
-            tabela_servicos._tbl.remove(linha_para_apagar._tr)
-
-    # 3. INTERAÇÃO PARA O CAMPO DO TOTAL
-    if pd.isna(total_valor) or str(total_valor).lower() == "nan":
-        total_valor = 0.0
-
-    valor_formatado_texto = f"{float(total_valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    
-    for t in doc.tables:
-        for row in t.rows:
-            contem_total = any("TOTAL" in cell.text.upper() for cell in row.cells)
-            if contem_total:
-                for cell in row.cells:
-                    if "R$" in cell.text or "NAN" in cell.text.upper() or cell.text.strip() == "":
-                        cell.text = f"R$ {valor_formatado_texto}"
-                        for p in cell.paragraphs:
-                            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                            for run in p.runs:
-                                run.bold = True
-                                run.font.name = 'Arial'
-                                run.font.size = Pt(12)
-                                run.font.color.rgb = RGBColor(234, 88, 12)
-
-    target = io.BytesIO()
-    doc.save(target)
-    target.seek(0)
-    return target
-
-
-# ==============================================================================
-# --- ABA 1: PROCESSAMENTO DA PLANILHA ---
-# ==============================================================================
-with aba1:
-    arquivo_carregado = st.file_uploader(
-        "Arraste ou selecione a planilha FPF_List para iniciar:",
-        type=["xlsx", "xls", "csv"],
-        key="uploader_planilha"
-    )
-
-    if arquivo_carregado is not None:
-        try:
-            conteudo = arquivo_carregado.read()
-            try:
-                excel_file = pd.ExcelFile(io.BytesIO(conteudo))
-                abas = excel_file.sheet_names
-                if len(abas) > 1:
-                    aba_selecionada = st.selectbox("Selecione a aba com os dados:", abas, key="selecao_abas_app")
-                else:
-                    aba_selecionada = abas[0]
-                df = pd.read_excel(io.BytesIO(conteudo), sheet_name=aba_selecionada)
-            except Exception:
-                try:
-                    df = pd.read_csv(io.BytesIO(conteudo), sep=";", encoding="utf-8")
-                    if df.shape[1] <= 1:
-                        df = pd.read_csv(io.BytesIO(conteudo), sep=",", encoding="utf-8")
-                except Exception:
-                    df = pd.read_csv(io.BytesIO(conteudo), sep=";", encoding="iso-8859-1")
-
-            if df is None or df.empty or len(df.columns) == 0:
-                st.error("Erro: Não foi possível processar a estrutura de dados deste arquivo.")
+                if manter_logado:
+                    # 💡 AQUI ESTÁ A MÁGICA: Agendamos o cookie para a próxima renderização da página!
+                    st.session_state.set_cookie_now = usuario["id"]
+                    
+                st.rerun()
             else:
-                df.columns = df.columns.str.strip()
-
-                if "T" in df.columns:
-                    df["T"] = df["T"].astype(str).str.strip()
-                    df_filtrado = df[df["T"] == "MOD"].copy()
+                st.error("Email ou senha incorretos.")
+                
+    with aba_cadastro:
+        st.subheader("Novo Cadastro")
+        novo_nome = st.text_input("Nome Completo", key="cad_nome")
+        novo_email = st.text_input("Email", key="cad_email")
+        nova_senha = st.text_input("Senha", type="password", key="cad_senha")
+        
+        if st.button("Cadastrar", type="secondary", use_container_width=True):
+            if novo_nome and novo_email and nova_senha:
+                resultado = cadastrar_usuario(novo_nome, novo_email, nova_senha)
+                if resultado == "sucesso":
+                    st.success("Conta criada com sucesso! Faça login na aba ao lado.")
+                elif resultado == "email_duplicado":
+                    st.error("⚠️ Este email já está cadastrado.")
+                elif resultado == "nome_duplicado":
+                    st.error("⚠️ Este nome já está em uso.")
                 else:
-                    st.warning("Aviso: A coluna 'T' não foi encontrada.")
-                    df_filtrado = df.copy()
+                    st.error("Erro técnico de comunicação com o Google. Tente novamente.")
+            else:
+                st.warning("Preencha todos os campos.")
 
-                # Adicionado "Cliente" explicitamente na captura inicial de colunas
-                colunas_originais = ["Arquivo ID", "Fabricante", "Matrícula", "FlashPoint", "Cliente", "Nome arquivo", "Dada"]
-                colunas_existentes = [col for col in colunas_originais if col in df_filtrado.columns]
-                df_filtrado = df_filtrado[colunas_existentes].copy()
+# --- INTERFACE: TELA LOGADO ---
+else:
+    with st.sidebar:
+        st.title(f"Olá, {st.session_state.user_nome} 👋")
+        
+        email_atual_limpo = st.session_state.user_email.strip().lower() if st.session_state.user_email else ""
+        if email_atual_limpo == EMAIL_ADMIN.strip().lower():
+            st.write("---")
+            if st.session_state.view_mode == "app":
+                if st.button("🛠️ Sala do Adm", use_container_width=True, type="primary"):
+                    pop_up_senha_adm() 
+            else:
+                if st.button("🏠 Voltar para o Sistema", use_container_width=True, type="primary"):
+                    st.session_state.view_mode = "app"
+                    st.rerun()
+            st.write("---")
+            
+        if st.button("🚪 Sair (Logout)", use_container_width=True):
+            # 💡 Agendando a exclusão do cookie com segurança
+            st.session_state.delete_cookie_now = True
+            st.session_state.deslogado = True
+            st.session_state.user_id = None
+            st.session_state.user_nome = None
+            st.session_state.user_email = None
+            st.session_state.historico_carregado = False
+            st.session_state.historico_definitivo = normalizar_tabela(pd.DataFrame())
+            st.rerun()
 
-                df_filtrado["Valor"] = df_filtrado.apply(calcular_valor_inicial, axis=1)
-
-                dicionario_renomear = {
-                    "Arquivo ID": "Nº Mapa",
-                    "Fabricante": "Veículo",
-                    "Matrícula": "Placa",
-                    "Nome arquivo": "Descrição",
-                    "Dada": "Data",
-                    "FlashPoint": "Flash Point",
-                }
-                df_filtrado = df_filtrado.rename(columns=dicionario_renomear)
-
-                # --- ALTERAÇÃO SOLICITADA: Incluído 'Cliente' exatamente entre 'Flash Point' e 'Descrição' ---
-                ordem_solicitada = ["Nº Mapa", "Data", "Veículo", "Placa", "Flash Point", "Cliente", "Descrição", "Valor"]
-                colunas_finais = [col for col in ordem_solicitada if col in df_filtrado.columns]
-                df_filtrado = df_filtrado[colunas_finais].copy()
-
-                # Ajuste e formatação da data para o padrão Brasil
-                if "Data" in df_filtrado.columns:
-                    df_filtrado["Data"] = pd.to_datetime(df_filtrado["Data"], errors='coerce')
-                    df_filtrado["Data"] = df_filtrado["Data"].dt.strftime('%d/%m/%Y').fillna("")
-
-                # Força a coluna Flash Point a virar Texto/String pura
-                if "Flash Point" in df_filtrado.columns:
-                    df_filtrado["Flash Point"] = df_filtrado["Flash Point"].astype(str).str.strip()
-                    df_filtrado = df_filtrado.sort_values(by=["Flash Point", "Nº Mapa"] if "Nº Mapa" in df_filtrado.columns else ["Flash Point"], ascending=True)
-
-                st.session_state.df_filtrado = df_filtrado.copy()
-
-                if not df_filtrado.empty and "Flash Point" in df_filtrado.columns:
-                    lista_linhas = []
-                    linhas_amarelas = []
-                    linhas_laranjas = []
-                    contador_linha_excel = 2
-
-                    for fp, bloco in df_filtrado.groupby("Flash Point", sort=False):
-                        placas_vistas = set()
-
-                        for idx, linha in bloco.iterrows():
-                            linha_dict = linha.to_dict()
-                            placa_atual = str(linha.get("Placa", "")).strip()
-
-                            if placa_atual in placas_vistas and placa_atual != "":
-                                linha_dict["Valor"] = None
-                                linhas_amarelas.append(contador_linha_excel)
+    # --- PAINEL ADMINISTRADOR ---
+    if st.session_state.view_mode == "admin":
+        st.title("🛠️ Painel Administrativo Cloud")
+        aba_admin_usuarios, aba_admin_historico = st.tabs(["👥 Gerenciar Usuários", "🌎 Ver Histórico Global"])
+        
+        with aba_admin_usuarios:
+            df_usuarios = listar_todos_usuarios()
+            if not df_usuarios.empty:
+                st.write(f"**Total de usuários cadastrados na nuvem:** {len(df_usuarios)}")
+                st.dataframe(df_usuarios, use_container_width=True, hide_index=True)
+                
+                st.write("---")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.subheader("✏️ Editar Nome")
+                    user_id_editar = st.selectbox("Selecione o Usuário:", df_usuarios["Nome"] + " (" + df_usuarios["Email"] + ")", key="sel_edit")
+                    novo_nome_admin = st.text_input("Novo Nome:")
+                    if st.button("Salvar Alteração"):
+                        if novo_nome_admin.strip():
+                            idx = df_usuarios[df_usuarios["Nome"] + " (" + df_usuarios["Email"] + ")" == user_id_editar].index[0]
+                            atualizar_nome_usuario_admin(int(df_usuarios.loc[idx, "id"]), novo_nome_admin)
+                            st.success("Nome updated!")
+                            st.rerun()
+                with col2:
+                    st.subheader("🗑️ Remover Usuário")
+                    user_id_remover = st.selectbox("Selecione o Usuário a ser apagado:", df_usuarios["Nome"] + " (" + df_usuarios["Email"] + ")", key="sel_del")
+                    if st.button("Confirmar Exclusão", type="primary"):
+                        idx = df_usuarios[df_usuarios["Nome"] + " (" + df_usuarios["Email"] + ")" == user_id_remover].index[0]
+                        id_real = int(df_usuarios.loc[idx, "id"])
+                        email_real = df_usuarios.loc[idx, "Email"].strip().lower()
+                        
+                        if email_real == EMAIL_ADMIN.strip().lower() or id_real == 1:
+                            st.error("❌ Ação Bloqueada! Por segurança, você não pode excluir o Administrador Master.")
+                        else:
+                            sucesso = deletar_usuario_admin(id_real)
+                            if sucesso:
+                                st.success("Usuário removido!")
+                                st.rerun()
                             else:
-                                if placa_atual != "":
-                                    placas_vistas.add(placa_atual)
-
-                            lista_linhas.append(linha_dict)
-                            contador_linha_excel += 1
-
-                        df_bloco_temp = pd.DataFrame(lista_linhas[-len(bloco) :])
-                        soma_bloco = pd.to_numeric(df_bloco_temp["Valor"], errors="coerce").sum()
-
-                        linha_total = {col: "" for col in colunas_finais}
-                        linha_total["Flash Point"] = fp
-                        # Se a coluna 'Cliente' existir no mapeamento final, mantém o nome do cliente na linha do total
-                        if "Cliente" in linha_total:
-                            linha_total["Cliente"] = str(bloco.iloc[0].get("Cliente", ""))
-                        linha_total["Descrição"] = "VALOR TOTAL:"
-                        linha_total["Valor"] = float(soma_bloco) if soma_bloco > 0 else ""
-
-                        lista_linhas.append(linha_total)
-                        linhas_laranjas.append(contador_linha_excel)
-                        contador_linha_excel += 1
-
-                        linha_espacamento = {col: "" for col in colunas_finais}
-                        lista_linhas.append(linha_espacamento)
-                        contador_linha_excel += 1
-
-                    if lista_linhas:
-                        lista_linhas.pop()
-
-                    df_excel_final = pd.DataFrame(lista_linhas, columns=colunas_finais)
-
-                    st.subheader("📋 Visualização Prévia dos Dados Processados")
-                    st.dataframe(df_filtrado)
-
-                    buffer = io.BytesIO()
-                    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-                        df_excel_final.to_excel(writer, index=False, sheet_name="FPF Realizados")
-
-                        workbook = writer.book
-                        worksheet = writer.sheets["FPF Realizados"]
-
-                        amarelo_claro = PatternFill(start_color="FFFFCC", end_color="FFFFCC", fill_type="solid")
-                        laranja_claro = PatternFill(start_color="FFE6CC", end_color="FFE6CC", fill_type="solid")
-
-                        for num_linha in linhas_amarelas:
-                            for col_idx in range(1, len(colunas_finais) + 1):
-                                worksheet.cell(row=num_linha, column=col_idx).fill = amarelo_claro
-
-                        for num_linha in linhas_laranjas:
-                            for col_idx in range(1, len(colunas_finais) + 1):
-                                worksheet.cell(row=num_linha, column=col_idx).fill = laranja_claro
-
-                    st.success("Planilha processada com sucesso na memória! Vá para a aba ao lado para gerar Ordens de Serviço.")
-                    st.download_button(
-                        label="📥 Baixar Planilha Processada (Excel)",
-                        data=buffer.getvalue(),
-                        file_name="FPF_Relatorio_Final.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    )
-        except Exception as e:
-            st.error(f"Erro crítico no processamento: {e}")
-
-# ==============================================================================
-# --- ABA 2: PREENCHIMENTO E CONSULTA DA ORDEM DE SERVIÇO ---
-# ==============================================================================
-with aba2:
-    st.subheader("📄 Emissor de Ordem de Serviço com Base no Modelo Original")
-    
-    modelo_word_carregado = st.file_uploader(
-        "Selecione o seu arquivo original 'MODELO - HYPER TORK PERFORMANCE.docx':",
-        type=["docx"],
-        key="uploader_modelo_word"
-    )
-    
-    if st.session_state.df_filtrado is None or st.session_state.df_filtrado.empty:
-        st.info("Aguardando o upload e processamento da planilha FPF_List na primeira aba para liberar o emissor.")
-    elif modelo_word_carregado is None:
-        st.warning("Por favor, anexe o arquivo original do seu modelo acima para habilitar o preenchimento automático.")
-    else:
-        df_base_os = st.session_state.df_filtrado
-        bytes_modelo = modelo_word_carregado.read()
-        
-        lista_fp_unicos = sorted(list(set(str(val).strip() for val in df_base_os["Flash Point"].unique() if pd.notna(val))))
-        
-        fp_selecionado = st.selectbox("Selecione o Flash Point para gerar a OS correspondente:", lista_fp_unicos)
-        
-        dados_bloco = df_base_os[df_base_os["Flash Point"] == fp_selecionado]
-        cliente_sugerido = str(dados_bloco.iloc[0].get("Cliente", "Cliente Não Identificado"))
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            nome_cliente_input = st.text_input("Cliente (Preenchido Automaticamente):", value=cliente_sugerido)
-            cidade_input = st.text_input("Cidade (Adicionar a critério do usuário):", placeholder="Ex: Cascavel - PR")
-        with col2:
-            flash_point_confirmacao = st.text_input("Flash Point Relacionado:", value=fp_selecionado, disabled=True)
-            contato_input = st.text_input("Contato (Adicionar a critério do usuário):", placeholder="Ex: (45) 99999-9999")
-            
-        st.write("### Serviços com Valores Definidos que farão parte desta OS (Linhas vazias serão excluídas do Word):")
-        
-        linhas_os_finais = []
-        placas_vistas_os = set()
-        soma_total_os = 0
-        
-        for idx, row in dados_bloco.iterrows():
-            row_dict = row.to_dict()
-            placa = str(row_dict.get("Placa", "")).strip()
-            
-            if placa in placas_vistas_os and placa != "":
-                row_dict["Valor"] = None
+                                st.error("Erro ao tentar remover o usuário.")
             else:
-                if placa != "":
-                    placas_vistas_os.add(placa)
-                if row_dict["Valor"] is not None and str(row_dict["Valor"]).lower() != "nan" and not pd.isna(row_dict["Valor"]):
-                    soma_total_os += float(row_dict["Valor"])
+                st.info("Nenhum usuário cadastrado.")
+                
+        with aba_admin_historico:
+            df_hist_global = listar_todo_historico_admin()
+            if not df_hist_global.empty:
+                st.dataframe(df_hist_global, use_container_width=True, hide_index=True)
+            else:
+                st.info("Nenhum histórico salvo na nuvem ainda.")
+
+    # --- VISÃO SISTEMA PADRÃO ---
+    else:
+        st.title("👥 Sistema Gestão de Designações")
+        aba_gerador, aba_historico, aba_grupos = st.tabs(["🗓️ Gerar e Editar Escala", "📊 Histórico Consolidado", "🗂️ Gestão de Grupos"])
+
+        with aba_gerador:
+            st.header("1. Configurar Nova Atividade")
+            if not st.session_state.grupos:
+                st.warning("Você não tem nenhum grupo cadastrado. Vá até a aba 'Gestão de Grupos' para criar um.")
+            else:
+                col1, col2 = st.columns([1, 1])
+                with col1: grupo_selecionado = st.selectbox("Selecione o Grupo:", list(st.session_state.grupos.keys()))
+                with col2: tarefa_nome = st.text_input("Nome da Atividade:", value="Coordenação do Evento")
+                    
+                if st.button("🔄 Gerar Sugestão de Duplas", type="primary", use_container_width=True):
+                    membros = st.session_state.grupos[grupo_selecionado]
+                    if len(membros) < 2: st.error("O grupo precisa ter pelo menos 2 pessoas.")
+                    else:
+                        st.session_state.escala_temporaria = normalizar_tabela(gerar_escala_sem_repeticao(membros))
+                        st.toast("Sugestão de duplas gerada com sucesso!", icon="💡")
+
+                if st.session_state.escala_temporaria is not None:
+                    st.write("---")
+                    st.subheader("✍️ 2. Área Editável: Ajuste, Adicione ou Remova Duplas")
+                    
+                    escala_editada = st.data_editor(
+                        st.session_state.escala_temporaria,
+                        column_config={
+                            "Principal": st.column_config.TextColumn("🧑‍✈️ Principal (Líder)", required=True),
+                            "Ajudante": st.column_config.TextColumn("🧑‍🔧 Ajudante", required=True),
+                            "Data de Trabalho": st.column_config.DateColumn("📅 Data de Trabalho", format="DD/MM/YYYY", required=True)
+                        },
+                        num_rows="dynamic", hide_index=True, use_container_width=True
+                    )
+                    
+                    if st.button("💾 Confirmar e Registrar no Histórico", type="secondary", use_container_width=True):
+                        df_registro = escala_editada.dropna(subset=["Principal", "Ajudante"]).copy()
+                        if df_registro.empty: st.warning("A tabela está vazia.")
+                        else:
+                            df_registro["Grupo"] = grupo_selecionado
+                            df_registro["Tarefa"] = tarefa_nome
+                            df_registro["Data de Registro"] = get_horario_brasilia()
+                            
+                            df_registro = normalizar_tabela(df_registro[["Grupo", "Tarefa", "Data de Trabalho", "Principal", "Ajudante", "Data de Registro"]])
+                            
+                            acrescentar_historico_db(st.session_state.user_id, df_registro)
+                            
+                            st.session_state.historico_definitivo = normalizar_tabela(pd.concat([st.session_state.historico_definitivo, df_registro], ignore_index=True))
+                            st.session_state.escala_temporaria = None
+                            st.success("Escala salva com sucesso na nuvem por blocos!")
+                            st.rerun()
+
+        with aba_historico:
+            st.header("📊 Seu Histórico de Atividades")
+            if not st.session_state.historico_definitivo.empty:
+                
+                # --- MODO LEITURA (BLINDADO COM DEFENSIVE PROGRAMMING) ---
+                df_exibir = normalizar_tabela(st.session_state.historico_definitivo).iloc[::-1].reset_index(drop=True)
+                
+                # Aplica a função de blindagem para evitar o AttributeError do .dt
+                df_exibir["Data de Trabalho"] = formatar_data_segura(df_exibir["Data de Trabalho"])
+                
+                df_exibir_visual = df_exibir.rename(columns={
+                    "Grupo": "🗂️ Grupo", "Tarefa": "📝 Tarefa", "Data de Trabalho": "📅 Data de Trabalho",
+                    "Principal": "🧑‍✈️ Principal", "Ajudante": "🧑‍🔧 Ajudante", "Data de Registro": "🕰️ Salvo Em"
+                })
+                
+                cores_pasteis = ['#E8F4F8', '#FFF3CD', '#D1E7DD', '#F8D7DA', '#E2E3E5', '#F3D8F4']
+                unique_timestamps = df_exibir_visual['🕰️ Salvo Em'].unique()
+                map_cores = {ts: cores_pasteis[i % len(cores_pasteis)] for i, ts in enumerate(unique_timestamps)}
+                
+                def colorir_fundo(row):
+                    cor = map_cores.get(row['🕰️ Salvo Em'], '#FFFFFF')
+                    return [f'background-color: {cor}; color: #000000; font-weight: 500;'] * len(row)
+                
+                try:
+                    df_estilizado = df_exibir_visual.style.apply(colorir_fundo, axis=1).hide(axis="index")
+                except AttributeError:
+                    df_estilizado = df_exibir_visual.style.apply(colorir_fundo, axis=1).hide_index()
+
+                st.dataframe(df_estilizado, use_container_width=True)
+                
+                # --- MODO EDIÇÃO AVANÇADA ---
+                with st.expander("🛠️ Ativar Modo de Edição Manual (Painel Branco)"):
+                    st.info("💡 Como a tabela acima foi blindada para aceitar as cores, use este painel se precisar alterar dados manualmente.")
+                    
+                    df_editated = st.data_editor(
+                        df_exibir_visual,
+                        column_config={
+                            "🕰️ Salvo Em": st.column_config.Column(disabled=True)
+                        },
+                        use_container_width=True, hide_index=True, key="editor_historico_definitivo"
+                    )
+                    
+                    df_editated_db = df_editated.rename(columns={
+                        "🗂️ Grupo": "Grupo", "📝 Tarefa": "Tarefa", "📅 Data de Trabalho": "Data de Trabalho",
+                        "🧑‍✈️ Principal": "Principal", "🧑‍🔧 Ajudante": "Ajudante", "🕰️ Salvo Em": "Data de Registro"
+                    })
+                    df_exibir_db = df_exibir.rename(columns={
+                        "🗂️ Grupo": "Grupo", "📝 Tarefa": "Tarefa", "📅 Data de Trabalho": "Data de Trabalho",
+                        "🧑‍✈️ Principal": "Principal", "🧑‍🔧 Ajudante": "Ajudante", "🕰️ Salvo Em": "Data de Registro"
+                    })
+
+                    df_editated_seguro = normalizar_tabela(df_editated_db)
+                    df_exibir_seguro = normalizar_tabela(df_exibir_db)
+
+                    if not df_editated_seguro.equals(df_exibir_seguro):
+                        df_para_salvar = df_editated_seguro.iloc[::-1].reset_index(drop=True)
+                        st.session_state.historico_definitivo = normalizar_tabela(df_para_salvar)
+                        atualizar_historico_completo_db(st.session_state.user_id, df_para_salvar)
+                        st.success("Alteração manual salva na nuvem!")
+                        st.rerun()
+                
+                st.write("---")
+                col_nome, col_baixar, col_limpar = st.columns([2, 1, 1])
+                with col_nome: nome_historico = st.text_input("Nome do arquivo de backup:", value="Escala_Geral")
+                with col_baixar:
+                    st.write(""); st.write("")
+                    csv = st.session_state.historico_definitivo.to_csv(index=False).encode('utf-8')
+                    st.download_button("📥 Baixar Backup (.csv)", data=csv, file_name=f"{nome_historico}.csv", mime='text/csv', use_container_width=True)
+                with col_limpar:
+                    st.write(""); st.write("")
+                    if st.button("🗑️ Limpar Todo o Histórico", use_container_width=True):
+                        st.session_state.historico_definitivo = normalizar_tabela(pd.DataFrame(columns=["Grupo", "Tarefa", "Data de Trabalho", "Principal", "Ajudante", "Data de Registro"]))
+                        atualizar_historico_completo_db(st.session_state.user_id, st.session_state.historico_definitivo)
+                        st.rerun()
+            else: st.info("Nenhum registro confirmado.")
+
+        with aba_grupos:
+            st.header("🗂️ Gestão de Grupos e Integrantes")
+            st.subheader("1. Gerenciar Grupos")
+            col_add_grp, col_ren_grp, col_del_grp = st.columns(3)
             
-            linhas_os_finais.append(row_dict)
-            
-        df_preview_os = pd.DataFrame(linhas_os_finais)
-        df_preview_os = df_preview_os[df_preview_os["Valor"].notna()].copy()
-        df_preview_os["Descrição"] = df_preview_os["Descrição"].apply(limpar_descricao_os)
-        
-        # Exibição do preview mantendo o controle das colunas que vão para a tela
-        colunas_preview_os = ["Nº Mapa", "Data", "Veículo", "Placa", "Descrição", "Valor"]
-        colunas_preview_existentes = [c for c in colunas_preview_os if c in df_preview_os.columns]
-        st.dataframe(df_preview_os[colunas_preview_existentes])
-        
-        st.metric(label="Valor Total Consolidado da OS (Apenas linhas válidas)", value=f"R$ {soma_total_os:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        
-        if st.button("🚀 Preencher e Gerar Ordem de Serviço"):
-            arquivo_word_final = modificar_modelo_docx(
-                modelo_bytes=bytes_modelo,
-                flash_point=fp_selecionado,
-                cliente_nome=nome_cliente_input,
-                cidade=cidade_input,
-                contato=contato_input,
-                linhas_tabela=linhas_os_finais,
-                total_valor=soma_total_os
-            )
-            
-            st.success(f"Ordem de Serviço para o Flash Point {fp_selecionado} gerada com sucesso!")
-            
-            st.download_button(
-                label="📥 Baixar Ordem de Serviço Pronta (.docx)",
-                data=arquivo_word_final.getvalue(),
-                file_name=f"OS_Hyper_Tork_{fp_selecionado}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
+            with col_add_grp:
+                novo_grupo_nome = st.text_input("Criar Novo Grupo:", key="input_add_grp")
+                if st.button("➕ Adicionar Grupo", use_container_width=True):
+                    if novo_grupo_nome.strip() and novo_grupo_nome.strip() not in st.session_state.grupos:
+                        st.session_state.grupos[novo_grupo_nome.strip()] = []
+                        salvar_grupos_db(st.session_state.user_id, st.session_state.grupos) 
+                        st.rerun()
+            with col_ren_grp:
+                if st.session_state.grupos:
+                    grupo_a_renomear = st.selectbox("Grupo a Renomear:", list(st.session_state.grupos.keys()), key="select_ren_grp")
+                    novo_nome_para_grupo = st.text_input("Novo Nome:", key="input_ren_grp")
+                    if st.button("✏️ Confirmar Nome", use_container_width=True):
+                        if novo_nome_para_grupo.strip() and novo_nome_para_grupo.strip() not in st.session_state.grupos:
+                            st.session_state.grupos[novo_nome_para_grupo.strip()] = st.session_state.grupos.pop(grupo_a_renomear)
+                            salvar_grupos_db(st.session_state.user_id, st.session_state.grupos) 
+                            st.rerun()
+            with col_del_grp:
+                if st.session_state.grupos:
+                    grupo_a_remover = st.selectbox("Excluir Grupo:", list(st.session_state.grupos.keys()), key="select_del_grp")
+                    if st.button("🗑️ Excluir Grupo", use_container_width=True):
+                        del st.session_state.grupos[grupo_a_remover]
+                        salvar_grupos_db(st.session_state.user_id, st.session_state.grupos) 
+                        st.rerun()
+
+            st.write("---")
+            st.subheader("2. Visualizar e Editar Integrantes")
+            if not st.session_state.grupos: st.info("Você não possui grupos.")
+            else:
+                grupo_visualizar = st.radio("Selecione o grupo:", list(st.session_state.grupos.keys()), horizontal=True)
+                lista_atual = st.session_state.grupos[grupo_visualizar]
+                st.write(f"**Integrantes do grupo ({len(lista_atual)} pessoas):**")
+                st.dataframe(pd.DataFrame(lista_atual, columns=["Nome do Integrante"]), use_container_width=True, hide_index=True)
+                
+                st.write("---")
+                col_adicionar, col_remover = st.columns([1, 1])
+                with col_adicionar:
+                    st.markdown("#### ➕ Adicionar integrante:")
+                    grupo_destino = st.selectbox("Escolha o grupo:", list(st.session_state.grupos.keys()), key="select_add_destino")
+                    novo_nome = st.text_input("Nome da pessoa:", key="input_add_membro")
+                    if st.button("Confirmar Adição", type="secondary", use_container_width=True):
+                        if novo_nome.strip() and novo_nome.strip() not in st.session_state.grupos[grupo_destino]:
+                            st.session_state.grupos[grupo_destino].append(novo_nome.strip())
+                            salvar_grupos_db(st.session_state.user_id, st.session_state.grupos) 
+                            st.rerun()
+                with col_remover:
+                    st.markdown("#### 🗑️ Remover integrante:")
+                    grupo_origem = st.selectbox("Escolha o grupo:", list(st.session_state.grupos.keys()), key="select_del_destino")
+                    lista_remocao = st.session_state.grupos[grupo_origem]
+                    if len(lista_remocao) > 0:
+                        selecionar_todos = st.checkbox("Selecionar todos", key="chk_sel_all")
+                        nomes_remover = st.multiselect("Pessoas:", options=lista_remocao, default=lista_remocao if selecionar_todos else [])
+                        if st.button("Confirmar Remoção", type="primary", use_container_width=True) and nomes_remover:
+                            for nome in nomes_remover: st.session_state.grupos[grupo_origem].remove(nome)
+                            salvar_grupos_db(st.session_state.user_id, st.session_state.grupos) 
+                            st.rerun()
+
+        # --- RODAPÉ ---
+        st.write("---")
+        st.markdown("""<div style="text-align: center; color: #888888; font-size: 12px; padding: 10px 0px;">Criado e atualizado por: Sérgio Sierra</div>""", unsafe_allow_html=True)
