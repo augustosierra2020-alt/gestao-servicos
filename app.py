@@ -7,7 +7,7 @@ from docx import Document
 from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
-# Configuração da página do Streamlit
+# Configuração da página do Streamlit...
 st.set_page_config(
     page_title="Gestão de Serviços & OS - Hyper Tork", page_icon="📊", layout="wide"
 )
