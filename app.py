@@ -2,7 +2,6 @@ import subprocess
 import sys
 
 # --- TRAVA DE AUTO-INSTALAÇÃO DE SEGURANÇA ---
-# Se o servidor do Streamlit não tiver o pacote do Word, o próprio script instala sozinho
 try:
     from docx import Document
 except ModuleNotFoundError:
@@ -10,6 +9,7 @@ except ModuleNotFoundError:
     from docx import Document
 
 import io
+import os
 import re
 import pandas as pd
 import streamlit as st
@@ -22,6 +22,18 @@ st.set_page_config(
     page_title="Gestão de Serviços & OS - Hyper Tork", page_icon="📊", layout="wide"
 )
 
+# --- POSICIONAMENTO ESTRATÉGICO DA LOGO NA TELA PRINCIPAL ---
+caminho_logo = "logo.png"
+if os.path.exists(caminho_logo):
+    # Cria 3 colunas para centralizar a imagem perfeitamente no meio da tela principal
+    col_logo1, col_logo2, col_logo3 = st.columns([1, 2, 1])
+    with col_logo2:
+        st.image(caminho_logo, use_container_width=True)
+    st.markdown("---") # Linha elegante de separação
+else:
+    st.info("📌 Dica: Suba o arquivo da sua logo recortada com o nome exato 'logo.png' no GitHub para exibi-la aqui no topo!")
+
+# Título Principal do Sistema
 st.title("📊 Gestão de Serviços & Emissão de OS")
 st.write(
     "Filtragem, cálculo de valores, remoção de duplicadas por Matrícula e preenchimento automático do modelo Word da Hyper Tork."
@@ -77,7 +89,6 @@ def limpar_descricao_os(desc_original):
 
 # --- FUNÇÃO QUE EDITA DIRETAMENTE O SEU ARQUIVO ORIGINAL ---
 def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, contato, linhas_tabela, total_valor):
-    # Abre exatamente o arquivo de modelo anexado preservando imagens e estilos originais
     doc = Document(io.BytesIO(modelo_bytes))
     
     # 1. Preencher os dados do Cabeçalho estritamente na caixa/célula da frente (row.cells[1])
@@ -104,7 +115,6 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
     # 2. Preencher a tabela de serviços original do seu documento
     linhas_validas = [l for l in linhas_tabela if l.get("Valor") is not None and str(l.get("Valor")).strip() != "" and str(l.get("Valor")).lower() != "nan"]
     
-    # Procuramos a tabela de serviços principal (a que tem "Nº MAPA")
     tabela_servicos = None
     for t in doc.tables:
         if len(t.rows) > 0 and "Nº MAPA" in t.rows[0].cells[0].text.upper():
@@ -113,7 +123,7 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
             
     if tabela_servicos:
         for i, linha in enumerate(linhas_validas):
-            idx_linha_destino = i + 1  # Ignora a linha 0 (cabeçalho da tabela)
+            idx_linha_destino = i + 1  
             
             if idx_linha_destino >= len(tabela_servicos.rows):
                 row_cells = tabela_servicos.add_row().cells
@@ -151,7 +161,6 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
 
     valor_formatado_texto = f"{float(total_valor):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     
-    # Busca por tabelas que contenham a linha do TOTAL e preenche a caixa do R$ (célula ao lado)
     for t in doc.tables:
         for row in t.rows:
             contem_total = any("TOTAL" in cell.text.upper() for cell in row.cells)
@@ -167,7 +176,6 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
                                 run.font.size = Pt(12)
                                 run.font.color.rgb = RGBColor(234, 88, 12)
 
-    # Salva o arquivo em memória mantendo a logo e o layout 100% intactos
     target = io.BytesIO()
     doc.save(target)
     target.seek(0)
@@ -231,17 +239,14 @@ with aba1:
                 }
                 df_filtrado = df_filtrado.rename(columns=dicionario_renomear)
 
-                # Mantido 'Cliente' exatamente entre 'Flash Point' e 'Descrição'
                 ordem_solicitada = ["Nº Mapa", "Data", "Veículo", "Placa", "Flash Point", "Cliente", "Descrição", "Valor"]
                 colunas_finais = [col for col in ordem_solicitada if col in df_filtrado.columns]
                 df_filtrado = df_filtrado[colunas_finais].copy()
 
-                # Ajuste e formatação da data para o padrão Brasil
                 if "Data" in df_filtrado.columns:
                     df_filtrado["Data"] = pd.to_datetime(df_filtrado["Data"], errors='coerce')
                     df_filtrado["Data"] = df_filtrado["Data"].dt.strftime('%d/%m/%Y').fillna("")
 
-                # Força a coluna Flash Point a virar Texto/String pura para evitar erros de tipos misturados
                 if "Flash Point" in df_filtrado.columns:
                     df_filtrado["Flash Point"] = df_filtrado["Flash Point"].astype(str).str.strip()
                     df_filtrado = df_filtrado.sort_values(by=["Flash Point", "Nº Mapa"] if "Nº Mapa" in df_filtrado.columns else ["Flash Point"], ascending=True)
@@ -311,7 +316,7 @@ with aba1:
                             for col_idx in range(1, len(colunas_finais) + 1):
                                 worksheet.cell(row=num_linha, column=col_idx).fill = amarelo_claro
 
-                        for num_linha in lines_laranjas:
+                        for num_linha in linhas_laranjas:
                             for col_idx in range(1, len(colunas_finais) + 1):
                                 worksheet.cell(row=num_linha, column=col_idx).fill = laranja_claro
 
