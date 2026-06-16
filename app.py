@@ -1,19 +1,11 @@
-import subprocess
-import sys
-
-# --- TRAVA DE AUTO-INSTALAÇÃO DE SEGURANÇA ---
-try:
-    from docx import Document
-except ModuleNotFoundError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "python-docx"])
-    from docx import Document
-
 import io
 import os
 import re
 import pandas as pd
 import streamlit as st
+from PIL import Image
 from openpyxl.styles import PatternFill
+from docx import Document
 from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
@@ -22,18 +14,41 @@ st.set_page_config(
     page_title="Gestão de Serviços & OS - Hyper Tork", page_icon="📊", layout="wide"
 )
 
+# --- FUNÇÃO DE INTELIGÊNCIA PARA REMOVER O FUNDO BRANCO DA LOGO ---
+def aplicar_fundo_transparente(caminho_img):
+    img = Image.open(caminho_img).convert("RGBA")
+    dados = img.getdata()
+    novos_dados = []
+    
+    for item in dados:
+        # Detecta cores muito claras (brancas ou fundo sólido) e as torna 100% transparentes
+        if item[0] >= 240 and item[1] >= 240 and item[2] >= 240:
+            novos_dados.append((255, 255, 255, 0)) # O zero no final cria a transparência
+        else:
+            novos_dados.append(item) # Mantém as cores originais da logo
+            
+    img.putdata(novos_dados)
+    return img
+
 # --- POSICIONAMENTO ESTRATÉGICO DA LOGO NA TELA PRINCIPAL ---
 caminho_logo = "logo.png"
 if os.path.exists(caminho_logo):
-    # Cria 3 colunas para centralizar a imagem perfeitamente no meio da tela principal
+    # Organiza em 3 colunas para manter a logo rigorosamente centralizada e elegante
     col_logo1, col_logo2, col_logo3 = st.columns([1, 2, 1])
     with col_logo2:
-        st.image(caminho_logo, use_container_width=True)
-    st.markdown("---") # Linha elegante de separação
+        try:
+            # Processa a imagem ao vivo para arrancar o fundo branco
+            logo_tratada = aplicar_fundo_transparente(caminho_logo)
+            st.image(logo_tratada, use_container_width=True)
+        except Exception:
+            # Se algo falhar, exibe a imagem original como plano B
+            st.image(caminho_logo, use_container_width=True)
+    st.markdown("---") # Linha de separação para o sistema
 else:
-    st.info("📌 Dica: Suba o arquivo da sua logo recortada com o nome exato 'logo.png' no GitHub para exibi-la aqui no topo!")
+    st.info("📌 Dica: Suba o arquivo da sua logo com o nome exato 'logo.png' no GitHub para exibi-la aqui no topo!")
 
-# Título Principal do Sistema
+
+# Título Principal
 st.title("📊 Gestão de Serviços & Emissão de OS")
 st.write(
     "Filtragem, cálculo de valores, remoção de duplicadas por Matrícula e preenchimento automático do modelo Word da Hyper Tork."
@@ -91,7 +106,6 @@ def limpar_descricao_os(desc_original):
 def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, contato, linhas_tabela, total_valor):
     doc = Document(io.BytesIO(modelo_bytes))
     
-    # 1. Preencher os dados do Cabeçalho estritamente na caixa/célula da frente (row.cells[1])
     for t in doc.tables:
         for row in t.rows:
             if len(row.cells) >= 2:
@@ -112,7 +126,6 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
                     for p in row.cells[1].paragraphs:
                         for run in p.runs: run.font.name = 'Arial'; run.font.size = Pt(11)
 
-    # 2. Preencher a tabela de serviços original do seu documento
     linhas_validas = [l for l in linhas_tabela if l.get("Valor") is not None and str(l.get("Valor")).strip() != "" and str(l.get("Valor")).lower() != "nan"]
     
     tabela_servicos = None
@@ -149,13 +162,11 @@ def modificar_modelo_docx(modelo_bytes, flash_point, cliente_nome, cidade, conta
                             r.font.name = 'Arial'
                             r.font.size = Pt(10)
                             
-        # EXCLUSÃO DAS LINHAS SOBRESSALENTES VAZIAS
         linha_inicio_remocao = len(linhas_validas) + 1
         while len(tabela_servicos.rows) > linha_inicio_remocao:
             linha_para_apagar = tabela_servicos.rows[linha_inicio_remocao]
             tabela_servicos._tbl.remove(linha_para_apagar._tr)
 
-    # 3. INTERAÇÃO PARA O CAMPO DO TOTAL (Preenchimento seguro na caixa da frente)
     if pd.isna(total_valor) or str(total_valor).lower() == "nan":
         total_valor = 0.0
 
